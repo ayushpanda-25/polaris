@@ -102,6 +102,72 @@ MODE_LABELS = {
 }
 
 
+def _add_bracket_corners(
+    fig: go.Figure,
+    x_idx: float,
+    y_idx: float,
+    color: str,
+    half: float = 0.46,
+    length: float = 0.20,
+    width: float = 2.5,
+    tag: str = "C",
+) -> None:
+    """
+    Draw 4 L-shaped corner brackets around a categorical-axis cell at
+    (x_idx, y_idx), plus a small filled "C" tag in the top-left corner.
+    With type='category' axes, the cell at column index N spans from N-0.5
+    to N+0.5 in plot coordinates, so we draw brackets just inside that
+    bounding box.
+
+    Viewfinder / scope reticle style + Bloomberg-style corner label.
+    """
+    # 4 corners × (horizontal segment + vertical segment) = 8 lines
+    corners = [
+        (x_idx - half, y_idx - half, +1, +1),   # top-left
+        (x_idx + half, y_idx - half, -1, +1),   # top-right
+        (x_idx - half, y_idx + half, +1, -1),   # bottom-left
+        (x_idx + half, y_idx + half, -1, -1),   # bottom-right
+    ]
+    line_style = dict(color=color, width=width)
+    for cx, cy, xd, yd in corners:
+        fig.add_shape(
+            type="line", xref="x", yref="y",
+            x0=cx, y0=cy,
+            x1=cx + xd * length, y1=cy,
+            line=line_style, layer="above",
+        )
+        fig.add_shape(
+            type="line", xref="x", yref="y",
+            x0=cx, y0=cy,
+            x1=cx, y1=cy + yd * length,
+            line=line_style, layer="above",
+        )
+
+    # Crown tag: filled rect with letter inside, top-left of cell.
+    # (y axis is reversed, so y_idx - half is the visual top.)
+    if tag:
+        tag_w = 0.16
+        tag_h = 0.32
+        tag_x0 = x_idx - half
+        tag_y0 = y_idx - half
+        fig.add_shape(
+            type="rect", xref="x", yref="y",
+            x0=tag_x0, y0=tag_y0,
+            x1=tag_x0 + tag_w, y1=tag_y0 + tag_h,
+            fillcolor=color,
+            line=dict(width=0),
+            layer="above",
+        )
+        fig.add_annotation(
+            xref="x", yref="y",
+            x=tag_x0 + tag_w / 2,
+            y=tag_y0 + tag_h / 2,
+            text=f"<b>{tag}</b>",
+            showarrow=False,
+            font=dict(family=MONO, size=10, color="#000000"),
+        )
+
+
 def _build_heatmap_figure(grid: GEXGrid, nodes: NodeMap, mode: str = "gex") -> go.Figure:
     if grid is None or not grid.cells:
         return go.Figure(
@@ -201,22 +267,21 @@ def _build_heatmap_figure(grid: GEXGrid, nodes: NodeMap, mode: str = "gex") -> g
 
     fig = go.Figure(data=[heat])
 
-    # King node marker — Bloomberg-style: amber square outline, no decoration
+    # King node marker — Bloomberg-style bracketed corners (viewfinder reticle)
     if nodes and nodes.king is not None:
         king_x_label = _format_exp(nodes.king.expiry)
         king_y_label = f"{nodes.king.strike:g}"
         if king_x_label in expiry_labels and king_y_label in strike_labels:
+            x_idx = expiry_labels.index(king_x_label)
+            y_idx = strike_labels.index(king_y_label)
+            _add_bracket_corners(fig, x_idx, y_idx, AMBER)
+            # Invisible scatter marker for hover info
             fig.add_trace(
                 go.Scatter(
                     x=[king_x_label],
                     y=[king_y_label],
                     mode="markers",
-                    marker=dict(
-                        symbol="square-open",
-                        size=26,
-                        color=AMBER,
-                        line=dict(width=2.5, color=AMBER),
-                    ),
+                    marker=dict(size=30, color="rgba(0,0,0,0)"),
                     name="King Node",
                     showlegend=False,
                     hovertemplate=(
@@ -349,16 +414,32 @@ def _build_trinity_figure(cache, mode: str = "gex") -> go.Figure:
             kx = _trinity_format_exp(nodes.king.expiry)
             ky = f"{nodes.king.strike:g}"
             if kx in exp_labels and ky in strike_labels:
-                fig.add_trace(
-                    go.Scatter(
-                        x=[kx], y=[ky],
-                        mode="markers",
-                        marker=dict(symbol="star", size=18, color="#f9d649",
-                                    line=dict(width=1.5, color="#1b1b1b")),
-                        showlegend=False,
-                    ),
-                    row=1, col=idx,
-                )
+                # Trinity mode: subplot-aware bracket corners.
+                # add_shape with row/col + xref/yref='x'/'y' references
+                # the subplot's local axes.
+                x_idx = exp_labels.index(kx)
+                y_idx = strike_labels.index(ky)
+                half, length, width = 0.46, 0.22, 2
+                corners = [
+                    (x_idx - half, y_idx - half, +1, +1),
+                    (x_idx + half, y_idx - half, -1, +1),
+                    (x_idx - half, y_idx + half, +1, -1),
+                    (x_idx + half, y_idx + half, -1, -1),
+                ]
+                line_style = dict(color=AMBER, width=width)
+                for cx, cy, xd, yd in corners:
+                    fig.add_shape(
+                        type="line",
+                        x0=cx, y0=cy, x1=cx + xd * length, y1=cy,
+                        line=line_style, layer="above",
+                        row=1, col=idx,
+                    )
+                    fig.add_shape(
+                        type="line",
+                        x0=cx, y0=cy, x1=cx, y1=cy + yd * length,
+                        line=line_style, layer="above",
+                        row=1, col=idx,
+                    )
 
     fig.update_layout(
         template="plotly_dark",
@@ -396,7 +477,9 @@ def _build_trinity_figure(cache, mode: str = "gex") -> go.Figure:
 # --------------- App layout ---------------
 
 def create_app(cache, tickers: list[str]) -> Dash:
-    app = Dash(__name__, title="Polaris")
+    # Assets folder is at project root, not next to this script
+    assets_path = str(Path(__file__).resolve().parents[1] / "assets")
+    app = Dash(__name__, title="Polaris", assets_folder=assets_path)
 
     # Reusable cell builders ---------------------------------------
     def _hdr_cell(label, value, color=ORANGE, value_color=None):
@@ -477,11 +560,15 @@ def create_app(cache, tickers: list[str]) -> Dash:
                             "backgroundColor": BG_BLACK,
                         },
                         children=[
-                            html.Span("★", style={
-                                "fontSize": 18,
-                                "color": ORANGE,
-                                "marginRight": 10,
-                            }),
+                            html.Img(
+                                src="/assets/northstar.svg",
+                                style={
+                                    "width": 24,
+                                    "height": 24,
+                                    "marginRight": 12,
+                                    "filter": "drop-shadow(0 0 4px rgba(250,140,0,0.5))",
+                                },
+                            ),
                             html.Span("POLARIS", style={
                                 "fontSize": 16,
                                 "color": ORANGE,
@@ -607,12 +694,13 @@ def create_app(cache, tickers: list[str]) -> Dash:
     )
 
     def _build_freshness_badge(status):
-        """Bloomberg-style status pill in the top right."""
-        dot_color = status.color
+        """Bloomberg-style status indicator — colored word, no dot."""
         return [
-            html.Span("●", style={"color": dot_color, "marginRight": 8, "fontSize": 12}),
             html.Span(status.label, style={
-                "color": dot_color, "fontWeight": 700, "marginRight": 8,
+                "color": status.color,
+                "fontWeight": 700,
+                "marginRight": 10,
+                "letterSpacing": 1.5,
             }),
             html.Span(
                 status.message.replace("Live · ", "").split(" — ")[0]

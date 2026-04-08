@@ -1,0 +1,42 @@
+<svg width="24" height="24" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="ns_core" cx="50%" cy="50%" r="60%">
+      <stop offset="0%"  stop-color="#ffd60a"/>
+      <stop offset="35%" stop-color="#ffb627"/>
+      <stop offset="80%" stop-color="#fa8c00"/>
+      <stop offset="100%" stop-color="#cc6a00"/>
+    </radialGradient>
+    <filter id="ns_glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="0.8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Faint diagonal sparkle rays -->
+  <g opacity="0.35" stroke="#fa8c00" stroke-width="0.6" stroke-linecap="round">
+    <line x1="5"  y1="5"  x2="9"  y2="9"/>
+    <line x1="19" y1="5"  x2="15" y2="9"/>
+    <line x1="5"  y1="19" x2="9"  y2="15"/>
+    <line x1="19" y1="19" x2="15" y2="15"/>
+  </g>
+
+  <!-- Four-point compass star with elongated N/S axis (the classic North Star) -->
+  <path
+    d="M12 0
+       L13.2 10.2
+       L24 12
+       L13.2 13.8
+       L12 24
+       L10.8 13.8
+       L0 12
+       L10.8 10.2
+       Z"
+    fill="url(#ns_core)"
+    filter="url(#ns_glow)"/>
+
+  <!-- Bright center dot -->
+  <circle cx="12" cy="12" r="0.9" fill="#fff5d0"/>
+</svg>

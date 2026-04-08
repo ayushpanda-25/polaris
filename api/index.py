@@ -70,7 +70,8 @@ for _t in app_config.TICKERS:
         print(f"[vercel cold-start] {_t} prime failed: {e}")
 
 
-app = Dash(__name__, title="POLARIS · Dealer GEX Terminal")
+_assets_path = str(Path(__file__).resolve().parents[1] / "assets")
+app = Dash(__name__, title="POLARIS · Dealer GEX Terminal", assets_folder=_assets_path)
 server = app.server  # Vercel hooks into this Flask WSGI object
 
 
@@ -139,11 +140,15 @@ app.layout = html.Div(
                         "borderRight": f"1px solid {BORDER_BRIGHT}",
                     },
                     children=[
-                        html.Span("★", style={
-                            "fontSize": 18,
-                            "color": ORANGE,
-                            "marginRight": 10,
-                        }),
+                        html.Img(
+                            src="/assets/northstar.svg",
+                            style={
+                                "width": 24,
+                                "height": 24,
+                                "marginRight": 12,
+                                "filter": "drop-shadow(0 0 4px rgba(250,140,0,0.5))",
+                            },
+                        ),
                         html.Span("POLARIS", style={
                             "fontSize": 16,
                             "color": ORANGE,
