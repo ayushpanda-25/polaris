@@ -14,7 +14,6 @@ Run:
 from __future__ import annotations
 
 import argparse
-import base64
 import sys
 import time
 from datetime import datetime
@@ -24,23 +23,6 @@ import dash
 import numpy as np
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, dcc, html
-
-
-# ─── Embed the North Star SVG as a base64 data URI so Plotly can render it
-# inside heatmap cells via add_layout_image without depending on a server
-# being able to serve /assets/northstar.svg at the moment of figure render.
-def _load_north_star_data_uri() -> str:
-    try:
-        svg_path = Path(__file__).resolve().parents[1] / "assets" / "northstar.svg"
-        if svg_path.exists():
-            data = svg_path.read_bytes()
-            b64 = base64.b64encode(data).decode("ascii")
-            return f"data:image/svg+xml;base64,{b64}"
-    except Exception:
-        pass
-    return ""
-
-NORTH_STAR_DATA_URI = _load_north_star_data_uri()
 
 # Allow running as "python -m src.dashboard" from project root
 if __package__ in (None, ""):
@@ -128,8 +110,8 @@ def _add_bracket_corners(
     half: float = 0.46,
     length: float = 0.20,
     width: float = 2.5,
-    show_star: bool = True,
-    star_size: float = 0.30,
+    row: int = None,
+    col: int = None,
 ) -> None:
     """
     Draw 4 L-shaped corner brackets around a categorical-axis cell at
@@ -147,42 +129,23 @@ def _add_bracket_corners(
         (x_idx + half, y_idx + half, -1, -1),   # bottom-right
     ]
     line_style = dict(color=color, width=width)
+    add_shape_kwargs = {}
+    if row is not None and col is not None:
+        add_shape_kwargs = {"row": row, "col": col}
     for cx, cy, xd, yd in corners:
         fig.add_shape(
             type="line", xref="x", yref="y",
             x0=cx, y0=cy,
             x1=cx + xd * length, y1=cy,
             line=line_style, layer="above",
+            **add_shape_kwargs,
         )
         fig.add_shape(
             type="line", xref="x", yref="y",
             x0=cx, y0=cy,
             x1=cx, y1=cy + yd * length,
             line=line_style, layer="above",
-        )
-
-    # Mini north star inside the top-left of the cell (option C from the
-    # icon preview — echoes the brand mark in the header).
-    #
-    # We use add_annotation with fractional category coordinates (which
-    # works on category axes — Scatter does NOT) and a system unicode
-    # font fallback list so the glyph actually renders. JetBrains Mono
-    # doesn't ship a glyph for ✦ — it falls back to a narrow serif.
-    # Apple Symbols / Segoe UI Symbol / Arial Unicode all have it.
-    if show_star:
-        fig.add_annotation(
-            xref="x", yref="y",
-            x=x_idx - half + 0.05,
-            y=y_idx - half + 0.03,
-            text="✦",
-            showarrow=False,
-            xanchor="left",
-            yanchor="top",
-            font=dict(
-                family="'Apple Symbols', 'Segoe UI Symbol', 'Arial Unicode MS', sans-serif",
-                size=28,
-                color=color,
-            ),
+            **add_shape_kwargs,
         )
 
 
@@ -432,44 +395,11 @@ def _build_trinity_figure(cache, mode: str = "gex") -> go.Figure:
             kx = _trinity_format_exp(nodes.king.expiry)
             ky = f"{nodes.king.strike:g}"
             if kx in exp_labels and ky in strike_labels:
-                # Trinity mode: subplot-aware bracket corners + mini star.
-                # add_shape with row/col references the subplot's local axes.
                 x_idx = exp_labels.index(kx)
                 y_idx = strike_labels.index(ky)
-                half, length, width = 0.46, 0.22, 2
-                corners = [
-                    (x_idx - half, y_idx - half, +1, +1),
-                    (x_idx + half, y_idx - half, -1, +1),
-                    (x_idx - half, y_idx + half, +1, -1),
-                    (x_idx + half, y_idx + half, -1, -1),
-                ]
-                line_style = dict(color=AMBER, width=width)
-                for cx, cy, xd, yd in corners:
-                    fig.add_shape(
-                        type="line",
-                        x0=cx, y0=cy, x1=cx + xd * length, y1=cy,
-                        line=line_style, layer="above",
-                        row=1, col=idx,
-                    )
-                    fig.add_shape(
-                        type="line",
-                        x0=cx, y0=cy, x1=cx, y1=cy + yd * length,
-                        line=line_style, layer="above",
-                        row=1, col=idx,
-                    )
-                # Mini ✦ in top-left of cell (smaller in trinity mode)
-                fig.add_annotation(
-                    x=x_idx - half + 0.05,
-                    y=y_idx - half + 0.03,
-                    text="✦",
-                    showarrow=False,
-                    xanchor="left",
-                    yanchor="top",
-                    font=dict(
-                        family="'Apple Symbols', 'Segoe UI Symbol', 'Arial Unicode MS', sans-serif",
-                        size=18,
-                        color=AMBER,
-                    ),
+                _add_bracket_corners(
+                    fig, x_idx, y_idx, AMBER,
+                    length=0.22, width=2,
                     row=1, col=idx,
                 )
 
