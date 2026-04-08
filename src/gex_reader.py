@@ -1,10 +1,10 @@
 """
-Thin read-only API for other tools (AlphaForge, analytics, scripts)
-that want to consume the SQLite store populated by sqlite_writer.
+Thin read-only API for other tools / analytics scripts that want to
+consume the SQLite store populated by sqlite_writer.
 
 Usage:
-    from skylit_replica.gex_reader import get_latest_king_node
-    print(get_latest_king_node("SPY"))
+    from polaris.gex_reader import get_latest_sirius
+    print(get_latest_sirius("SPY"))
 """
 from __future__ import annotations
 
@@ -20,7 +20,8 @@ except (ImportError, ValueError):
 
 
 @dataclass
-class KingNodeRow:
+class SiriusRow:
+    """One row of the sirius_nodes table — the dominant strike at a point in time."""
     ts: int
     ticker: str
     strike: float
@@ -28,19 +29,20 @@ class KingNodeRow:
     gex_value: float
 
 
-def get_latest_king_node(ticker: str, db_path: Path = _DEFAULT_DB) -> Optional[KingNodeRow]:
+def get_latest_sirius(ticker: str, db_path: Path = _DEFAULT_DB) -> Optional[SiriusRow]:
+    """Return the most recent Sirius node logged for the given ticker."""
     if not Path(db_path).exists():
         return None
     with sqlite3.connect(db_path) as conn:
         cur = conn.execute(
             "SELECT ts, ticker, strike, expiry, gex_value "
-            "FROM king_nodes WHERE ticker = ? ORDER BY ts DESC LIMIT 1",
+            "FROM sirius_nodes WHERE ticker = ? ORDER BY ts DESC LIMIT 1",
             (ticker,),
         )
         row = cur.fetchone()
     if not row:
         return None
-    return KingNodeRow(*row)
+    return SiriusRow(*row)
 
 
 def get_latest_grid(ticker: str, db_path: Path = _DEFAULT_DB) -> list[tuple]:

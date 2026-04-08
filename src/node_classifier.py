@@ -1,12 +1,20 @@
 """
-Node classification — King, Gatekeeper, Midpoint.
+Node classification — Sirius, Gatekeeper, Midpoint.
 
-Implements the Skylit taxonomy from docs.skylit.ai/core-concepts:
-    King Node: highest absolute GEX value in the grid. Price gravitates
-               here by EOD/EOW.
-    Gatekeeper Nodes: next-strongest nodes sitting between spot and king,
-                      acting as deflection levels.
-    Midpoint Zones: the ~1:1 R/R trap regions between two comparable nodes.
+The Sirius is the dominant gravitational center: the cell with the highest
+absolute GEX value in the grid. Named after the brightest star in the night
+sky — the standout, the one everything orbits around in the dealer
+positioning map.
+
+    Sirius:     The strike with the largest |GEX| — where dealers carry
+                the largest hedging burden. Price gravitates here by EOD/EOW.
+    Gatekeepers: Next-strongest nodes sitting between spot and Sirius,
+                acting as deflection levels.
+    Midpoint Zones: ~1:1 R/R trap regions between two comparable nodes.
+
+(In Skylit's vocabulary the dominant cell is called the "King Node".
+Polaris uses Sirius to keep its naming inside the celestial / Astraios
+theme: Polaris guides you, Sirius is what you're aiming at.)
 """
 from __future__ import annotations
 
@@ -22,37 +30,37 @@ class Node:
     strike: float
     expiry: str
     value: float         # signed GEX (in $k)
-    role: str            # "king" | "gatekeeper" | "midpoint"
+    role: str            # "sirius" | "gatekeeper" | "midpoint"
     significant: bool = True   # False if magnitude gap is too thin to trust
 
 
 @dataclass
 class NodeMap:
-    king: Optional[Node]
+    sirius: Optional[Node]
     gatekeepers: list[Node]
     midpoints: list[Node]
 
 
-# Significance threshold: King |GEX| must be at least this multiple of the
-# median |GEX| of the top-K cells to be considered a "clear leader". On
-# quiet days the top cell is barely larger than its neighbors and the
-# "King" is meaningless noise.
+# Significance threshold: Sirius |GEX| must be at least this multiple of
+# the median |GEX| of the top-K cells to be considered a "clear leader".
+# On quiet days the top cell is barely larger than its neighbors and the
+# Sirius is meaningless noise.
 SIGNIFICANCE_RATIO = 1.5
 SIGNIFICANCE_TOP_K = 5
 
 
-def _is_king_significant(grid: GEXGrid, king_cell: GEXCell) -> bool:
+def _is_sirius_significant(grid: GEXGrid, sirius_cell: GEXCell) -> bool:
     """
-    Returns True if the King's |GEX| is meaningfully larger than the median
-    of the top-K runners-up. Used to suppress "no clear leader" days.
+    Returns True if the Sirius's |GEX| is meaningfully larger than the
+    median of the top-K runners-up. Used to suppress "no clear leader" days.
     """
     top_k = sorted(grid.cells, key=lambda c: abs(c.gex_value), reverse=True)[:SIGNIFICANCE_TOP_K]
     if len(top_k) < 2:
-        return True  # only one cell — trivially the King
+        return True  # only one cell — trivially the Sirius
     runners_median = median(abs(c.gex_value) for c in top_k[1:])
     if runners_median == 0:
-        return abs(king_cell.gex_value) > 0
-    return abs(king_cell.gex_value) >= SIGNIFICANCE_RATIO * runners_median
+        return abs(sirius_cell.gex_value) > 0
+    return abs(sirius_cell.gex_value) >= SIGNIFICANCE_RATIO * runners_median
 
 
 def classify_nodes(
@@ -62,24 +70,24 @@ def classify_nodes(
 ) -> NodeMap:
     """Classify the most important nodes in a GEXGrid."""
     if not grid.cells:
-        return NodeMap(king=None, gatekeepers=[], midpoints=[])
+        return NodeMap(sirius=None, gatekeepers=[], midpoints=[])
 
-    # King = cell with largest absolute GEX
-    king_cell = max(grid.cells, key=lambda c: abs(c.gex_value))
-    king = Node(
-        strike=king_cell.strike,
-        expiry=king_cell.expiry,
-        value=king_cell.gex_value,
-        role="king",
-        significant=_is_king_significant(grid, king_cell),
+    # Sirius = cell with largest absolute GEX (the dominant magnet)
+    sirius_cell = max(grid.cells, key=lambda c: abs(c.gex_value))
+    sirius = Node(
+        strike=sirius_cell.strike,
+        expiry=sirius_cell.expiry,
+        value=sirius_cell.gex_value,
+        role="sirius",
+        significant=_is_sirius_significant(grid, sirius_cell),
     )
 
-    # Gatekeepers: next strongest cells between spot and king
+    # Gatekeepers: next strongest cells between spot and Sirius
     spot = grid.spot
-    lo, hi = sorted([spot, king.strike])
+    lo, hi = sorted([spot, sirius.strike])
     candidates = [
         c for c in grid.cells
-        if lo <= c.strike <= hi and not (c.strike == king.strike and c.expiry == king.expiry)
+        if lo <= c.strike <= hi and not (c.strike == sirius.strike and c.expiry == sirius.expiry)
     ]
     candidates.sort(key=lambda c: abs(c.gex_value), reverse=True)
     gatekeepers = [
@@ -91,7 +99,7 @@ def classify_nodes(
     # where the mid between them forms a 1:1 R/R trap.
     midpoints = _find_midpoints(grid.cells, midpoint_tol)
 
-    return NodeMap(king=king, gatekeepers=gatekeepers, midpoints=midpoints)
+    return NodeMap(sirius=sirius, gatekeepers=gatekeepers, midpoints=midpoints)
 
 
 def _find_midpoints(cells: list[GEXCell], tol: float) -> list[Node]:

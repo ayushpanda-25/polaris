@@ -181,11 +181,22 @@ Read this once, then keep it open in a tab while you watch the heatmap until
 the patterns become automatic.
 </p>
 
+<div class="box">
+  <div class="label">THE NAMING</div>
+  <p style="margin-bottom:0">
+    <span class="key">Polaris finds you Sirius.</span>
+    Polaris is the navigation star — the tool you orient yourself by. Sirius is
+    the brightest star in the night sky — the dominant magnet of dealer
+    positioning, the one strike everything else orbits around. The whole
+    dashboard exists to put you on Sirius.
+  </p>
+</div>
+
 <h1>The 30-Second Version</h1>
 <div class="box">
   <div class="label">THE WHOLE SYSTEM IN THREE QUESTIONS</div>
   <p>
-    1. <span class="key">Where is the magnet?</span> — find the King strike.<br>
+    1. <span class="key">Where is the magnet?</span> — find the Sirius strike.<br>
     2. <span class="key">Is it pulling or repelling?</span> — check the sign.<br>
     3. <span class="key">Are all three indices saying the same thing?</span> — flip to Trinity Mode.
   </p>
@@ -282,8 +293,8 @@ the patterns become automatic.
 
 <h1>How To Tell Signal From Noise</h1>
 <p>
-  The King strike isn't always meaningful. On quiet days the top cell barely beats
-  the runners-up and the "King" is just whichever cell happened to win by a hair.
+  The Sirius strike isn't always meaningful. On quiet days the top cell barely beats
+  the runners-up and the Sirius is just whichever cell happened to win by a hair.
   Polaris flags these as <span class="dim">"no clear leader"</span> automatically,
   but here are the five tests in order of importance:
 </p>
@@ -291,19 +302,19 @@ the patterns become automatic.
 <ol class="test-list">
   <li>
     <div class="name">MAGNITUDE GAP</div>
-    The King's |GEX| should be at least <span class="key">2× the median of the top 5 cells</span>.
+    The Sirius's |GEX| should be at least <span class="key">2× the median of the top 5 cells</span>.
     Polaris uses 1.5× as the threshold to flag "no clear leader" automatically.
   </li>
   <li>
     <div class="name">STABILITY</div>
-    Has the King been at the same strike for 30+ minutes? If yes, dealers have
+    Has the Sirius been at the same strike for 30+ minutes? If yes, dealers have
     settled their hedges there. If it's flickering between strikes, ignore it
     until it picks one.
   </li>
   <li>
     <div class="name">TIME OF DAY</div>
-    First 30 min: positioning still building, ignore the King. Last 30 min:
-    King is at peak strength, gamma concentrates. Lunch (11:30–13:00 ET): dead
+    First 30 min: positioning still building, ignore the Sirius. Last 30 min:
+    Sirius is at peak strength, gamma concentrates. Lunch (11:30–13:00 ET): dead
     time, low signal.
   </li>
   <li>
@@ -314,7 +325,7 @@ the patterns become automatic.
   <li>
     <div class="name">RESHUFFLE COOLDOWN</div>
     If Polaris shows a <span class="yellow">RESHUFFLED Ns ago</span> tag in the
-    header, the King strike just changed. Wait for it to settle before acting —
+    header, the Sirius strike just changed. Wait for it to settle before acting —
     your old thesis no longer describes current dealer positioning.
   </li>
 </ol>
@@ -327,17 +338,17 @@ the patterns become automatic.
     or <span class="dim">OFFLINE</span> = stop reading.
   </li>
   <li>
-    <span class="key">Look at the King's color.</span> Amber/green = pin regime,
+    <span class="key">Look at the Sirius's color.</span> Amber/green = pin regime,
     fade extremes. Deep red = trend regime, get out of the way.
   </li>
   <li>
-    <span class="key">Check the King's distance from spot.</span> If spot is far
-    from the King, the King is a <em>target</em> — price will drift toward it.
-    If spot is right at the King, the King is a <em>pin</em> — price will sit there.
+    <span class="key">Check the Sirius's distance from spot.</span> If spot is far
+    from the Sirius, the Sirius is a <em>target</em> — price will drift toward it.
+    If spot is right at the Sirius, the Sirius is a <em>pin</em> — price will sit there.
   </li>
   <li>
     <span class="key">Look at the gatekeepers</span> in the bottom status bar. These
-    are the secondary nodes between current price and the King — failed tests of
+    are the secondary nodes between current price and the Sirius — failed tests of
     these often signal a regime flip.
   </li>
   <li>
@@ -346,7 +357,7 @@ the patterns become automatic.
     sit out.
   </li>
   <li>
-    <span class="key">End of day:</span> the King at 30 minutes before close is
+    <span class="key">End of day:</span> the Sirius at 30 minutes before close is
     usually where it'll close, ±2 strikes. <em>Unless</em> a reshuffle happens.
   </li>
 </ol>
@@ -366,16 +377,16 @@ the patterns become automatic.
 <h1>What The Significance Flag Means</h1>
 <p>
   When Polaris detects that the top GEX cell isn't meaningfully bigger than its
-  runners-up, the header shows the King strike in dim grey with the value
+  runners-up, the header shows the Sirius strike in dim grey with the value
   replaced by <span class="dim">"no clear leader"</span>. This means the day is
   too quiet (or the time too early) for dealer positioning to give you a signal.
-  <span class="key">When this flag appears, don't trade off the King.</span>
+  <span class="key">When this flag appears, don't trade off the Sirius.</span>
   It's noise.
 </p>
 
 <h1>What The Reshuffle Flag Means</h1>
 <p>
-  When the King strike+expiry suddenly changes, Polaris shows
+  When the Sirius strike+expiry suddenly changes, Polaris shows
   <span class="yellow">⚠ RESHUFFLED Ns ago</span> in the header for 2 minutes.
   This usually happens when:
 </p>
@@ -388,7 +399,7 @@ the patterns become automatic.
 <p>
   <span class="key">Immediately after a reshuffle, your old thesis is invalid.</span>
   Wait 2–5 minutes for the new structure to settle, then re-read the dashboard
-  fresh. The old King is no longer where dealers are hedging.
+  fresh. The old Sirius is no longer where dealers are hedging.
 </p>
 
 <h1>The Slogan</h1>

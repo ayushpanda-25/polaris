@@ -311,30 +311,30 @@ app.layout = html.Div(
 
 def _build_header_cells(grid, nodes, reshuffle_age=None):
     if grid is None:
-        return [_hdr_cell("SPOT", "—"), _hdr_cell("KING", "—")]
+        return [_hdr_cell("SPOT", "—"), _hdr_cell("SIRIUS", "—")]
     spot_str = f"${grid.spot:,.2f}"
-    king = nodes.king if nodes else None
+    sirius = nodes.sirius if nodes else None
     is_reshuffled = reshuffle_age is not None and reshuffle_age < 120
 
-    if king is None:
-        king_str, king_val = "—", ""
-        king_color, val_color = TEXT_DIM, TEXT_DIM
-    elif not king.significant:
-        king_str = f"{king.strike:g}"
-        king_val = "no clear leader"
-        king_color = TEXT_DIM
+    if sirius is None:
+        s_str, s_val = "—", ""
+        s_color, val_color = TEXT_DIM, TEXT_DIM
+    elif not sirius.significant:
+        s_str = f"{sirius.strike:g}"
+        s_val = "no clear leader"
+        s_color = TEXT_DIM
         val_color = TEXT_DIM
     else:
-        king_str = f"{king.strike:g}"
-        king_val = f"${king.value:+,.0f}K"
-        king_color = AMBER
-        val_color = GREEN if king.value > 0 else RED
+        s_str = f"{sirius.strike:g}"
+        s_val = f"${sirius.value:+,.0f}K"
+        s_color = AMBER
+        val_color = GREEN if sirius.value > 0 else RED
 
     ts_str = datetime.fromtimestamp(grid.timestamp).strftime("%H:%M:%S")
     cells = [
         _hdr_cell("SPOT", spot_str, value_color=CYAN),
-        _hdr_cell("KING STRIKE", king_str, value_color=king_color),
-        _hdr_cell("KING VALUE", king_val, value_color=val_color),
+        _hdr_cell("SIRIUS STRIKE", s_str, value_color=s_color),
+        _hdr_cell("SIRIUS VALUE", s_val, value_color=val_color),
     ]
     if is_reshuffled:
         cells.append(_hdr_cell("RESHUFFLED", f"{int(reshuffle_age)}s ago", value_color=YELLOW))
@@ -351,11 +351,11 @@ def _format_status_bar(grid, nodes, mode, ticker, reshuffle_age=None):
     ))
     parts.append(html.Span(f"MODE {MODE_LABELS.get(mode, mode).upper():<10}",
                            style={"color": TEXT_DIM, "marginRight": 12}))
-    if nodes and nodes.king:
-        king = nodes.king
-        if not king.significant:
+    if nodes and nodes.sirius:
+        sirius = nodes.sirius
+        if not sirius.significant:
             parts.append(html.Span(
-                f"KING {king.strike:>6g}",
+                f"SIRIUS {sirius.strike:>6g}",
                 style={"color": TEXT_DIM, "marginRight": 8},
             ))
             parts.append(html.Span(
@@ -364,12 +364,12 @@ def _format_status_bar(grid, nodes, mode, ticker, reshuffle_age=None):
             ))
         else:
             parts.append(html.Span(
-                f"KING {king.strike:>6g} @ {king.expiry}",
+                f"SIRIUS {sirius.strike:>6g} @ {sirius.expiry}",
                 style={"color": AMBER, "marginRight": 12},
             ))
-            v_color = GREEN if king.value > 0 else RED
+            v_color = GREEN if sirius.value > 0 else RED
             parts.append(html.Span(
-                f"{king.value:+,.0f}K",
+                f"{sirius.value:+,.0f}K",
                 style={"color": v_color, "marginRight": 16, "fontWeight": 700},
             ))
         if reshuffle_age is not None and reshuffle_age < 120:
@@ -377,13 +377,13 @@ def _format_status_bar(grid, nodes, mode, ticker, reshuffle_age=None):
                 f"⚠ RESHUFFLED {int(reshuffle_age)}s ago  ",
                 style={"color": YELLOW, "marginRight": 12, "fontWeight": 700},
             ))
-    if nodes and nodes.gatekeepers and (not nodes.king or nodes.king.significant):
+    if nodes and nodes.gatekeepers and (not nodes.sirius or nodes.sirius.significant):
         parts.append(html.Span("GATEKEEPERS ", style={"color": TEXT_DIM, "marginRight": 4}))
         for g in nodes.gatekeepers[:3]:
             col = GREEN if g.value > 0 else RED
             parts.append(html.Span(f"{g.strike:g} ", style={"color": ORANGE}))
             parts.append(html.Span(f"{g.value:+,.0f}K  ", style={"color": col}))
-    if not (nodes and (nodes.king or nodes.gatekeepers)):
+    if not (nodes and (nodes.sirius or nodes.gatekeepers)):
         parts.append(html.Span("(awaiting data)", style={"color": TEXT_DIM}))
     return parts
 
@@ -416,7 +416,7 @@ def _update(_n, ticker, mode):
             nodes = _cache.get_nodes(t)
             if grid is not None:
                 break
-        reshuffle_age = _cache.king_reshuffle_age(t) if grid else None
+        reshuffle_age = _cache.sirius_reshuffle_age(t) if grid else None
         return (
             fig,
             _build_header_cells(grid, nodes, reshuffle_age),
@@ -431,7 +431,7 @@ def _update(_n, ticker, mode):
         grid = _cache.get_grid(ticker)
         nodes = _cache.get_nodes(ticker)
 
-    reshuffle_age = _cache.king_reshuffle_age(ticker)
+    reshuffle_age = _cache.sirius_reshuffle_age(ticker)
     fig = _build_heatmap_figure(grid, nodes, mode)
     return (
         fig,

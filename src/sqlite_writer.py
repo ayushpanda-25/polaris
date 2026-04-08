@@ -2,10 +2,10 @@
 Async SQLite writer — Option C cold path.
 
 Runs as a background thread. Every DB_FLUSH_INTERVAL seconds, snapshots
-the memory cache and persists all grids + king nodes to SQLite.
+the memory cache and persists all grids + Sirius nodes to SQLite.
 
-The dashboard never touches this code path. Other tools (AlphaForge,
-analytics scripts) read directly from gex.db.
+The dashboard never touches this code path. Other tools / analytics
+scripts read directly from gex.db.
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS gex_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_ticker_ts ON gex_snapshots(ticker, ts);
 
-CREATE TABLE IF NOT EXISTS king_nodes (
+CREATE TABLE IF NOT EXISTS sirius_nodes (
     ts         INTEGER NOT NULL,
     ticker     TEXT NOT NULL,
     strike     REAL NOT NULL,
@@ -56,7 +56,7 @@ def flush_cache(cache: GEXCache, db_path: Path) -> int:
     if not snap:
         return 0
     rows_gex = []
-    rows_king = []
+    rows_sirius = []
     for ticker, (grid, nodes) in snap.items():
         for cell in grid.cells:
             rows_gex.append(
@@ -70,14 +70,14 @@ def flush_cache(cache: GEXCache, db_path: Path) -> int:
                     grid.spot,
                 )
             )
-        if nodes.king is not None:
-            rows_king.append(
+        if nodes.sirius is not None:
+            rows_sirius.append(
                 (
                     grid.timestamp,
                     ticker,
-                    nodes.king.strike,
-                    nodes.king.expiry,
-                    nodes.king.value,
+                    nodes.sirius.strike,
+                    nodes.sirius.expiry,
+                    nodes.sirius.value,
                 )
             )
 
@@ -87,8 +87,8 @@ def flush_cache(cache: GEXCache, db_path: Path) -> int:
             rows_gex,
         )
         conn.executemany(
-            "INSERT OR REPLACE INTO king_nodes VALUES (?,?,?,?,?)",
-            rows_king,
+            "INSERT OR REPLACE INTO sirius_nodes VALUES (?,?,?,?,?)",
+            rows_sirius,
         )
         conn.commit()
     return len(rows_gex)

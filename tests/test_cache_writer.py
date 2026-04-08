@@ -6,7 +6,7 @@ from pathlib import Path
 from src.compute_loop import ComputeLoop
 from src.data_feed import SyntheticOptionsFeed
 from src.gex_engine import GEXCell, GEXGrid
-from src.gex_reader import get_latest_king_node
+from src.gex_reader import get_latest_sirius
 from src.memory_cache import GEXCache
 from src.node_classifier import NodeMap, classify_nodes
 from src.sqlite_writer import flush_cache, init_db
@@ -28,7 +28,7 @@ def test_cache_get_set():
     grid, nodes = _mk_grid()
     cache.update("SPY", grid, nodes)
     assert cache.get_grid("SPY") is grid
-    assert cache.get_nodes("SPY").king.strike == 500.0
+    assert cache.get_nodes("SPY").sirius.strike == 500.0
 
 
 def test_sqlite_writer_roundtrip(tmp_path):
@@ -44,11 +44,11 @@ def test_sqlite_writer_roundtrip(tmp_path):
     with sqlite3.connect(db) as conn:
         count = conn.execute("SELECT COUNT(*) FROM gex_snapshots").fetchone()[0]
         assert count == 3
-        king = conn.execute("SELECT ticker, strike FROM king_nodes").fetchone()
-        assert king == ("SPY", 500.0)
+        sirius = conn.execute("SELECT ticker, strike FROM sirius_nodes").fetchone()
+        assert sirius == ("SPY", 500.0)
 
 
-def test_gex_reader_latest_king_node(tmp_path):
+def test_gex_reader_latest_sirius(tmp_path):
     db = tmp_path / "test_gex.db"
     init_db(db)
     cache = GEXCache()
@@ -56,7 +56,7 @@ def test_gex_reader_latest_king_node(tmp_path):
     cache.update("SPY", grid, nodes)
     flush_cache(cache, db)
 
-    row = get_latest_king_node("SPY", db)
+    row = get_latest_sirius("SPY", db)
     assert row is not None
     assert row.strike == 500.0
     assert row.ticker == "SPY"
@@ -78,5 +78,5 @@ def test_compute_loop_populates_cache():
     grid = cache.get_grid("SPY")
     assert grid is not None
     assert len(grid.cells) > 0
-    king = cache.get_nodes("SPY").king
-    assert king is not None
+    sirius = cache.get_nodes("SPY").sirius
+    assert sirius is not None

@@ -259,29 +259,29 @@ def _build_heatmap_figure(grid: GEXGrid, nodes: NodeMap, mode: str = "gex") -> g
 
     fig = go.Figure(data=[heat])
 
-    # King node marker — Bloomberg-style bracketed corners (viewfinder reticle)
-    if nodes and nodes.king is not None:
-        king_x_label = _format_exp(nodes.king.expiry)
-        king_y_label = f"{nodes.king.strike:g}"
-        if king_x_label in expiry_labels and king_y_label in strike_labels:
-            x_idx = expiry_labels.index(king_x_label)
-            y_idx = strike_labels.index(king_y_label)
+    # Sirius marker — Bloomberg-style bracketed corners (viewfinder reticle)
+    if nodes and nodes.sirius is not None:
+        sx_label = _format_exp(nodes.sirius.expiry)
+        sy_label = f"{nodes.sirius.strike:g}"
+        if sx_label in expiry_labels and sy_label in strike_labels:
+            x_idx = expiry_labels.index(sx_label)
+            y_idx = strike_labels.index(sy_label)
             _add_bracket_corners(fig, x_idx, y_idx, AMBER)
             # Invisible scatter marker for hover info
             fig.add_trace(
                 go.Scatter(
-                    x=[king_x_label],
-                    y=[king_y_label],
+                    x=[sx_label],
+                    y=[sy_label],
                     mode="markers",
                     marker=dict(size=30, color="rgba(0,0,0,0)"),
-                    name="King Node",
+                    name="Sirius",
                     showlegend=False,
                     hovertemplate=(
                         f"<span style='font-family:monospace'>"
-                        f"<b>KING NODE</b><br>"
-                        f"STRIKE  {nodes.king.strike}<br>"
-                        f"EXPIRY  {nodes.king.expiry}<br>"
-                        f"VALUE   ${nodes.king.value:,.0f}K"
+                        f"<b>SIRIUS</b><br>"
+                        f"STRIKE  {nodes.sirius.strike}<br>"
+                        f"EXPIRY  {nodes.sirius.expiry}<br>"
+                        f"VALUE   ${nodes.sirius.value:,.0f}K"
                         f"</span><extra></extra>"
                     ),
                 )
@@ -402,9 +402,9 @@ def _build_trinity_figure(cache, mode: str = "gex") -> go.Figure:
             ),
             row=1, col=idx,
         )
-        if nodes and nodes.king is not None:
-            kx = _trinity_format_exp(nodes.king.expiry)
-            ky = f"{nodes.king.strike:g}"
+        if nodes and nodes.sirius is not None:
+            kx = _trinity_format_exp(nodes.sirius.expiry)
+            ky = f"{nodes.sirius.strike:g}"
             if kx in exp_labels and ky in strike_labels:
                 x_idx = exp_labels.index(kx)
                 y_idx = strike_labels.index(ky)
@@ -740,35 +740,35 @@ def create_app(cache, tickers: list[str]) -> Dash:
     def _build_header_cells(grid, nodes, reshuffle_age):
         """The Bloomberg-style header data row, with significance + reshuffle."""
         if grid is None:
-            return [_hdr_cell("SPOT", "—"), _hdr_cell("KING", "—"), _hdr_cell("TIME", "—")]
+            return [_hdr_cell("SPOT", "—"), _hdr_cell("SIRIUS", "—"), _hdr_cell("TIME", "—")]
         spot_str = f"${grid.spot:,.2f}"
 
-        king = nodes.king if nodes else None
+        sirius = nodes.sirius if nodes else None
         is_reshuffled = reshuffle_age is not None and reshuffle_age < 120  # 2 min window
 
-        if king is None:
-            king_str = "—"
-            king_val = ""
-            king_color = TEXT_DIM
+        if sirius is None:
+            s_str = "—"
+            s_val = ""
+            s_color = TEXT_DIM
             val_color = TEXT_DIM
-        elif not king.significant:
+        elif not sirius.significant:
             # No clear leader — magnitude gap too thin to trust
-            king_str = f"{king.strike:g}"
-            king_val = "no clear leader"
-            king_color = TEXT_DIM
+            s_str = f"{sirius.strike:g}"
+            s_val = "no clear leader"
+            s_color = TEXT_DIM
             val_color = TEXT_DIM
         else:
-            king_str = f"{king.strike:g}"
-            king_val = f"${king.value:+,.0f}K"
-            king_color = AMBER
-            val_color = GREEN if king.value > 0 else RED
+            s_str = f"{sirius.strike:g}"
+            s_val = f"${sirius.value:+,.0f}K"
+            s_color = AMBER
+            val_color = GREEN if sirius.value > 0 else RED
 
         ts_str = datetime.fromtimestamp(grid.timestamp).strftime("%H:%M:%S")
 
         cells = [
             _hdr_cell("SPOT", spot_str, color=CYAN),
-            _hdr_cell("KING STRIKE", king_str, value_color=king_color),
-            _hdr_cell("KING VALUE", king_val, value_color=val_color),
+            _hdr_cell("SIRIUS STRIKE", s_str, value_color=s_color),
+            _hdr_cell("SIRIUS VALUE", s_val, value_color=val_color),
         ]
         # Reshuffle flag — only show if recently changed
         if is_reshuffled:
@@ -808,14 +808,14 @@ def create_app(cache, tickers: list[str]) -> Dash:
                 nodes = cache.get_nodes(t)
                 if grid is not None:
                     break
-            reshuffle_age = cache.king_reshuffle_age(t) if grid else None
+            reshuffle_age = cache.sirius_reshuffle_age(t) if grid else None
             header = _build_header_cells(grid, nodes, reshuffle_age)
             status_bar = self_format_status_bar(grid, nodes, mode, "TRINITY", reshuffle_age)
             return fig, badge, banner, header, status_bar, blurb
 
         grid = cache.get_grid(ticker)
         nodes = cache.get_nodes(ticker)
-        reshuffle_age = cache.king_reshuffle_age(ticker)
+        reshuffle_age = cache.sirius_reshuffle_age(ticker)
         fig = _build_heatmap_figure(grid, nodes, mode)
         header = _build_header_cells(grid, nodes, reshuffle_age)
         status_bar = self_format_status_bar(grid, nodes, mode, ticker, reshuffle_age)
@@ -831,11 +831,11 @@ def create_app(cache, tickers: list[str]) -> Dash:
         ))
         parts.append(html.Span(f"MODE {MODE_LABELS.get(mode, mode).upper():<10}",
                                style={"color": TEXT_DIM, "marginRight": 12}))
-        if nodes and nodes.king:
-            king = nodes.king
-            if not king.significant:
+        if nodes and nodes.sirius:
+            sirius = nodes.sirius
+            if not sirius.significant:
                 parts.append(html.Span(
-                    f"KING {king.strike:>6g}",
+                    f"SIRIUS {sirius.strike:>6g}",
                     style={"color": TEXT_DIM, "marginRight": 8},
                 ))
                 parts.append(html.Span(
@@ -844,12 +844,12 @@ def create_app(cache, tickers: list[str]) -> Dash:
                 ))
             else:
                 parts.append(html.Span(
-                    f"KING {king.strike:>6g} @ {king.expiry}",
+                    f"SIRIUS {sirius.strike:>6g} @ {sirius.expiry}",
                     style={"color": AMBER, "marginRight": 12},
                 ))
-                v_color = GREEN if king.value > 0 else RED
+                v_color = GREEN if sirius.value > 0 else RED
                 parts.append(html.Span(
-                    f"{king.value:+,.0f}K",
+                    f"{sirius.value:+,.0f}K",
                     style={"color": v_color, "marginRight": 16, "fontWeight": 700},
                 ))
             # Reshuffle flag
@@ -858,7 +858,7 @@ def create_app(cache, tickers: list[str]) -> Dash:
                     f"⚠ RESHUFFLED {int(reshuffle_age)}s ago  ",
                     style={"color": YELLOW, "marginRight": 12, "fontWeight": 700},
                 ))
-        if nodes and nodes.gatekeepers and (not nodes.king or nodes.king.significant):
+        if nodes and nodes.gatekeepers and (not nodes.sirius or nodes.sirius.significant):
             gk_strs = []
             for g in nodes.gatekeepers[:3]:
                 col = GREEN if g.value > 0 else RED
@@ -872,7 +872,7 @@ def create_app(cache, tickers: list[str]) -> Dash:
                 ))
             parts.append(html.Span("GATEKEEPERS ", style={"color": TEXT_DIM, "marginRight": 4}))
             parts.extend(gk_strs)
-        if not (nodes and (nodes.king or nodes.gatekeepers)):
+        if not (nodes and (nodes.sirius or nodes.gatekeepers)):
             parts.append(html.Span("(awaiting data)", style={"color": TEXT_DIM}))
         return parts
 

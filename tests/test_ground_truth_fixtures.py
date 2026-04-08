@@ -11,28 +11,28 @@ def test_13_snapshots_loaded():
     assert len(SPY_2026_04_07) == 13
 
 
-def test_king_node_stable_at_658_until_close():
-    # All snapshots except the last should have King at 658 @ 0DTE
+def test_sirius_stable_at_658_until_close():
+    # All snapshots except the last should have Sirius at 658 @ 0DTE
     pre_close = SPY_2026_04_07[:-1]
     # First one is at 657 (edge case when spot was below 657)
-    assert pre_close[0].king_strike == 657.0
+    assert pre_close[0].sirius_strike == 657.0
     for snap in pre_close[1:]:
-        assert snap.king_strike == 658.0
-        assert snap.king_expiry == "2026-04-07"
+        assert snap.sirius_strike == 658.0
+        assert snap.sirius_expiry == "2026-04-07"
 
 
 def test_reshuffle_at_final_snapshot():
     last = SPY_2026_04_07[-1]
-    assert last.king_strike == 660.0
-    assert last.king_expiry == "2026-04-08"
+    assert last.sirius_strike == 660.0
+    assert last.sirius_expiry == "2026-04-08"
     assert "reshuffle" in last.notes.lower()
 
 
-def test_all_king_values_positive():
-    """Per the Skylit screenshots, the King Node is bright yellow (positive)."""
+def test_all_sirius_values_positive():
+    """Per the Skylit screenshots, the dominant cell is bright yellow (positive)."""
     for snap in SPY_2026_04_07:
-        assert snap.king_value_k > 0, (
-            f"{snap.timestamp}: king value should be positive but is {snap.king_value_k}"
+        assert snap.sirius_value_k > 0, (
+            f"{snap.timestamp}: Sirius value should be positive but is {snap.sirius_value_k}"
         )
 
 
@@ -40,7 +40,7 @@ def test_get_by_timestamp():
     snap = get_by_timestamp("15:53:19")
     assert snap is not None
     assert snap.spot == 658.38
-    assert snap.king_value_k > 540_000  # was $548,749K
+    assert snap.sirius_value_k > 540_000  # was $548,749K
 
 
 def test_persistent_structure_present():
