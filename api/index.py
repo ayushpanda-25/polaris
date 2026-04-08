@@ -74,7 +74,12 @@ for _t in app_config.TICKERS:
 
 
 _assets_path = str(Path(__file__).resolve().parents[1] / "assets")
-app = Dash(__name__, title="POLARIS · Dealer GEX Terminal", assets_folder=_assets_path)
+# Tab title makes it obvious this is the demo build — not the live terminal.
+app = Dash(
+    __name__,
+    title="⚠ POLARIS DEMO — fake data",
+    assets_folder=_assets_path,
+)
 server = app.server  # Vercel hooks into this Flask WSGI object
 register_learn_route(server)
 
@@ -116,6 +121,9 @@ def _hdr_cell(label, value, value_color=ORANGE):
 #  Layout
 # ────────────────────────────────────────────────────────────────────
 
+DEMO_YELLOW = "#ffd60a"
+DEMO_RED = "#ff3333"
+
 app.layout = html.Div(
     style={
         "backgroundColor": BG_BLACK,
@@ -126,6 +134,69 @@ app.layout = html.Div(
         "margin": 0,
     },
     children=[
+        # ═══ DEMO WARNING STRIPE (yellow/black hazard bar across the top) ═══
+        # Impossible to miss. This is the Vercel public deploy — numbers
+        # below are synthetic fake data, do NOT use them for trading.
+        html.Div(
+            style={
+                "backgroundImage": (
+                    f"repeating-linear-gradient(45deg, {DEMO_YELLOW} 0 20px, "
+                    f"#000000 20px 40px)"
+                ),
+                "padding": "3px 0",
+            },
+            children=[
+                html.Div(
+                    style={
+                        "backgroundColor": "#1a1400",
+                        "borderTop": f"1px solid {DEMO_YELLOW}",
+                        "borderBottom": f"1px solid {DEMO_YELLOW}",
+                        "padding": "8px 18px",
+                        "display": "flex",
+                        "alignItems": "center",
+                        "gap": 16,
+                        "fontFamily": MONO,
+                    },
+                    children=[
+                        html.Span("⚠", style={
+                            "fontSize": 20,
+                            "color": DEMO_YELLOW,
+                            "fontWeight": 700,
+                        }),
+                        html.Span("DEMO MODE — FAKE DATA", style={
+                            "fontSize": 13,
+                            "color": DEMO_YELLOW,
+                            "fontWeight": 700,
+                            "letterSpacing": 2,
+                        }),
+                        html.Span(
+                            "Every number below is synthetic Black-Scholes output, "
+                            "generated fresh for each page load. DO NOT TRADE off this. "
+                            "For live LSEG data, run locally: "
+                            "python3 -m src.dashboard --lseg",
+                            style={
+                                "fontSize": 11,
+                                "color": "#ffffff",
+                                "opacity": 0.9,
+                            },
+                        ),
+                        html.A(
+                            "github.com/ayushpanda-25/polaris ↗",
+                            href="https://github.com/ayushpanda-25/polaris",
+                            target="_blank",
+                            style={
+                                "marginLeft": "auto",
+                                "fontSize": 11,
+                                "color": DEMO_YELLOW,
+                                "textDecoration": "none",
+                                "letterSpacing": 0.5,
+                            },
+                        ),
+                    ],
+                ),
+            ],
+        ),
+
         # ═══ TOP BAR ═══
         html.Div(
             style={
