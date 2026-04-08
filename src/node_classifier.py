@@ -10,7 +10,8 @@ Implements the Skylit taxonomy from docs.skylit.ai/core-concepts:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from statistics import median
 from typing import Optional
 
 from .gex_engine import GEXCell, GEXGrid
@@ -22,6 +23,7 @@ class Node:
     expiry: str
     value: float         # signed GEX (in $k)
     role: str            # "king" | "gatekeeper" | "midpoint"
+    significant: bool = True   # False if magnitude gap is too thin to trust
 
 
 @dataclass
@@ -29,6 +31,28 @@ class NodeMap:
     king: Optional[Node]
     gatekeepers: list[Node]
     midpoints: list[Node]
+
+
+# Significance threshold: King |GEX| must be at least this multiple of the
+# median |GEX| of the top-K cells to be considered a "clear leader". On
+# quiet days the top cell is barely larger than its neighbors and the
+# "King" is meaningless noise.
+SIGNIFICANCE_RATIO = 1.5
+SIGNIFICANCE_TOP_K = 5
+
+
+def _is_king_significant(grid: GEXGrid, king_cell: GEXCell) -> bool:
+    """
+    Returns True if the King's |GEX| is meaningfully larger than the median
+    of the top-K runners-up. Used to suppress "no clear leader" days.
+    """
+    top_k = sorted(grid.cells, key=lambda c: abs(c.gex_value), reverse=True)[:SIGNIFICANCE_TOP_K]
+    if len(top_k) < 2:
+        return True  # only one cell — trivially the King
+    runners_median = median(abs(c.gex_value) for c in top_k[1:])
+    if runners_median == 0:
+        return abs(king_cell.gex_value) > 0
+    return abs(king_cell.gex_value) >= SIGNIFICANCE_RATIO * runners_median
 
 
 def classify_nodes(
@@ -47,6 +71,7 @@ def classify_nodes(
         expiry=king_cell.expiry,
         value=king_cell.gex_value,
         role="king",
+        significant=_is_king_significant(grid, king_cell),
     )
 
     # Gatekeepers: next strongest cells between spot and king

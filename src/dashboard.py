@@ -30,6 +30,7 @@ if __package__ in (None, ""):
     from src.compute_loop import ComputeLoop
     from src.data_feed import make_feed
     from src.gex_engine import GEXGrid
+    from src.learn_page import register_learn_route
     from src.memory_cache import get_cache
     from src.node_classifier import NodeMap
     from src.sqlite_writer import SQLiteWriter
@@ -43,6 +44,7 @@ else:
     from .compute_loop import ComputeLoop
     from .data_feed import make_feed
     from .gex_engine import GEXGrid
+    from .learn_page import register_learn_route
     from .memory_cache import get_cache
     from .node_classifier import NodeMap
     from .sqlite_writer import SQLiteWriter
@@ -99,6 +101,15 @@ MODE_LABELS = {
     "gex_norm": "GEX · √T",
     "vex": "VEX",
     "color": "Color (∂Γ/∂t)",
+}
+
+# One-line explanation of each view mode — shown next to the mode selector
+# and in the /learn page. Keep these short enough to fit on one line.
+MODE_BLURBS = {
+    "gex": "Raw dealer gamma exposure — where dealers will hedge as price moves. Positive (amber) pins, negative (red) repels.",
+    "gex_norm": "GEX scaled by √T to even out 0DTE dominance. Use in the morning to see longer-dated structure.",
+    "vex": "Vanna exposure — dealer hedges driven by volatility changes. Aligns with GEX on conviction days, fights it on whipsaw days.",
+    "color": "∂Γ/∂t — rate of gamma growth into expiry. Spikes mark strikes about to become magnetic into the close.",
 }
 
 
@@ -442,6 +453,7 @@ def create_app(cache, tickers: list[str]) -> Dash:
     # Assets folder is at project root, not next to this script
     assets_path = str(Path(__file__).resolve().parents[1] / "assets")
     app = Dash(__name__, title="Polaris", assets_folder=assets_path)
+    register_learn_route(app.server)
 
     # Reusable cell builders ---------------------------------------
     def _hdr_cell(label, value, color=ORANGE, value_color=None):
@@ -625,6 +637,39 @@ def create_app(cache, tickers: list[str]) -> Dash:
                         },
                         inputStyle={"marginRight": 4, "accentColor": ORANGE},
                     ),
+                    # Inline mode commentary — populated by callback
+                    html.Div(
+                        id="mode-blurb",
+                        style={
+                            "color": TEXT_DIM,
+                            "fontFamily": MONO,
+                            "fontSize": 10,
+                            "letterSpacing": 0.3,
+                            "marginLeft": 16,
+                            "fontStyle": "italic",
+                            "flex": 1,
+                            "minWidth": 0,
+                            "overflow": "hidden",
+                            "textOverflow": "ellipsis",
+                            "whiteSpace": "nowrap",
+                        },
+                    ),
+                    # /learn link, far right of function bar
+                    html.A(
+                        "?  LEARN",
+                        href="/learn",
+                        target="_blank",
+                        style={
+                            "marginLeft": "auto",
+                            "color": ORANGE,
+                            "fontFamily": MONO,
+                            "fontSize": 11,
+                            "letterSpacing": 1,
+                            "textDecoration": "none",
+                            "padding": "4px 12px",
+                            "border": f"1px solid {BORDER_BRIGHT}",
+                        },
+                    ),
                 ],
             ),
 
@@ -692,22 +737,46 @@ def create_app(cache, tickers: list[str]) -> Dash:
             children=status.message.upper(),
         )
 
-    def _build_header_cells(grid, nodes):
-        """The Bloomberg-style header data row."""
+    def _build_header_cells(grid, nodes, reshuffle_age):
+        """The Bloomberg-style header data row, with significance + reshuffle."""
         if grid is None:
             return [_hdr_cell("SPOT", "—"), _hdr_cell("KING", "—"), _hdr_cell("TIME", "—")]
         spot_str = f"${grid.spot:,.2f}"
-        king_str = f"{nodes.king.strike:g}" if nodes and nodes.king else "—"
-        king_val = f"${nodes.king.value:+,.0f}K" if nodes and nodes.king else ""
+
+        king = nodes.king if nodes else None
+        is_reshuffled = reshuffle_age is not None and reshuffle_age < 120  # 2 min window
+
+        if king is None:
+            king_str = "—"
+            king_val = ""
+            king_color = TEXT_DIM
+            val_color = TEXT_DIM
+        elif not king.significant:
+            # No clear leader — magnitude gap too thin to trust
+            king_str = f"{king.strike:g}"
+            king_val = "no clear leader"
+            king_color = TEXT_DIM
+            val_color = TEXT_DIM
+        else:
+            king_str = f"{king.strike:g}"
+            king_val = f"${king.value:+,.0f}K"
+            king_color = AMBER
+            val_color = GREEN if king.value > 0 else RED
+
         ts_str = datetime.fromtimestamp(grid.timestamp).strftime("%H:%M:%S")
-        return [
+
+        cells = [
             _hdr_cell("SPOT", spot_str, color=CYAN),
-            _hdr_cell("KING STRIKE", king_str, color=AMBER),
-            _hdr_cell("KING VALUE", king_val,
-                      color=GREEN if nodes and nodes.king and nodes.king.value > 0 else RED),
-            _hdr_cell("UPDATED", ts_str, color=TEXT),
-            _hdr_cell("TICKER", grid.ticker, color=ORANGE),
+            _hdr_cell("KING STRIKE", king_str, value_color=king_color),
+            _hdr_cell("KING VALUE", king_val, value_color=val_color),
         ]
+        # Reshuffle flag — only show if recently changed
+        if is_reshuffled:
+            age_s = int(reshuffle_age)
+            cells.append(_hdr_cell("RESHUFFLED", f"{age_s}s ago", value_color=YELLOW))
+        cells.append(_hdr_cell("UPDATED", ts_str, value_color=TEXT))
+        cells.append(_hdr_cell("TICKER", grid.ticker, value_color=ORANGE))
+        return cells
 
     @app.callback(
         [
@@ -716,6 +785,7 @@ def create_app(cache, tickers: list[str]) -> Dash:
             Output("stale-banner", "children"),
             Output("header-cells", "children"),
             Output("node-summary", "children"),
+            Output("mode-blurb", "children"),
         ],
         [
             Input("poll", "n_intervals"),
@@ -728,6 +798,7 @@ def create_app(cache, tickers: list[str]) -> Dash:
         status = evaluate_freshness(latest_ts)
         badge = _build_freshness_badge(status)
         banner = _build_stale_banner(status)
+        blurb = MODE_BLURBS.get(mode, "")
 
         if ticker == "TRINITY":
             fig = _build_trinity_figure(cache, mode)
@@ -737,19 +808,21 @@ def create_app(cache, tickers: list[str]) -> Dash:
                 nodes = cache.get_nodes(t)
                 if grid is not None:
                     break
-            header = _build_header_cells(grid, nodes)
-            status_bar = self_format_status_bar(grid, nodes, mode, "TRINITY")
-            return fig, badge, banner, header, status_bar
+            reshuffle_age = cache.king_reshuffle_age(t) if grid else None
+            header = _build_header_cells(grid, nodes, reshuffle_age)
+            status_bar = self_format_status_bar(grid, nodes, mode, "TRINITY", reshuffle_age)
+            return fig, badge, banner, header, status_bar, blurb
 
         grid = cache.get_grid(ticker)
         nodes = cache.get_nodes(ticker)
+        reshuffle_age = cache.king_reshuffle_age(ticker)
         fig = _build_heatmap_figure(grid, nodes, mode)
-        header = _build_header_cells(grid, nodes)
-        status_bar = self_format_status_bar(grid, nodes, mode, ticker)
+        header = _build_header_cells(grid, nodes, reshuffle_age)
+        status_bar = self_format_status_bar(grid, nodes, mode, ticker, reshuffle_age)
 
-        return fig, badge, banner, header, status_bar
+        return fig, badge, banner, header, status_bar, blurb
 
-    def self_format_status_bar(grid, nodes, mode, ticker):
+    def self_format_status_bar(grid, nodes, mode, ticker, reshuffle_age=None):
         """Bloomberg-style bottom status bar with monospace fixed-width fields."""
         parts = []
         parts.append(html.Span(
@@ -759,16 +832,33 @@ def create_app(cache, tickers: list[str]) -> Dash:
         parts.append(html.Span(f"MODE {MODE_LABELS.get(mode, mode).upper():<10}",
                                style={"color": TEXT_DIM, "marginRight": 12}))
         if nodes and nodes.king:
-            parts.append(html.Span(
-                f"KING {nodes.king.strike:>6g} @ {nodes.king.expiry}",
-                style={"color": AMBER, "marginRight": 12},
-            ))
-            v_color = GREEN if nodes.king.value > 0 else RED
-            parts.append(html.Span(
-                f"{nodes.king.value:+,.0f}K",
-                style={"color": v_color, "marginRight": 16, "fontWeight": 700},
-            ))
-        if nodes and nodes.gatekeepers:
+            king = nodes.king
+            if not king.significant:
+                parts.append(html.Span(
+                    f"KING {king.strike:>6g}",
+                    style={"color": TEXT_DIM, "marginRight": 8},
+                ))
+                parts.append(html.Span(
+                    "(no clear leader)",
+                    style={"color": TEXT_DIM, "marginRight": 16, "fontStyle": "italic"},
+                ))
+            else:
+                parts.append(html.Span(
+                    f"KING {king.strike:>6g} @ {king.expiry}",
+                    style={"color": AMBER, "marginRight": 12},
+                ))
+                v_color = GREEN if king.value > 0 else RED
+                parts.append(html.Span(
+                    f"{king.value:+,.0f}K",
+                    style={"color": v_color, "marginRight": 16, "fontWeight": 700},
+                ))
+            # Reshuffle flag
+            if reshuffle_age is not None and reshuffle_age < 120:
+                parts.append(html.Span(
+                    f"⚠ RESHUFFLED {int(reshuffle_age)}s ago  ",
+                    style={"color": YELLOW, "marginRight": 12, "fontWeight": 700},
+                ))
+        if nodes and nodes.gatekeepers and (not nodes.king or nodes.king.significant):
             gk_strs = []
             for g in nodes.gatekeepers[:3]:
                 col = GREEN if g.value > 0 else RED

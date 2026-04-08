@@ -22,6 +22,7 @@ from dash import Dash, Input, Output, dcc, html
 
 from src.data_feed import SyntheticOptionsFeed
 from src.gex_engine import compute_grid
+from src.learn_page import register_learn_route
 from src.node_classifier import classify_nodes
 from src.dashboard import (
     AMBER,
@@ -30,12 +31,14 @@ from src.dashboard import (
     BORDER_BRIGHT,
     CYAN,
     GREEN,
+    MODE_BLURBS,
     MODE_LABELS,
     MONO,
     ORANGE,
     RED,
     TEXT,
     TEXT_DIM,
+    YELLOW,
     _build_heatmap_figure,
     _build_trinity_figure,
 )
@@ -73,6 +76,7 @@ for _t in app_config.TICKERS:
 _assets_path = str(Path(__file__).resolve().parents[1] / "assets")
 app = Dash(__name__, title="POLARIS · Dealer GEX Terminal", assets_folder=_assets_path)
 server = app.server  # Vercel hooks into this Flask WSGI object
+register_learn_route(server)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -246,23 +250,36 @@ app.layout = html.Div(
                     },
                     inputStyle={"marginRight": 4, "accentColor": ORANGE},
                 ),
-                # Live local link, far right
                 html.Div(
-                    style={"marginLeft": "auto"},
-                    children=[
-                        html.A(
-                            "GITHUB.COM/AYUSHPANDA-25/POLARIS ↗",
-                            href="https://github.com/ayushpanda-25/polaris",
-                            target="_blank",
-                            style={
-                                "color": TEXT_DIM,
-                                "fontSize": 10,
-                                "letterSpacing": 1,
-                                "textDecoration": "none",
-                                "fontFamily": MONO,
-                            },
-                        ),
-                    ],
+                    id="mode-blurb",
+                    style={
+                        "color": TEXT_DIM,
+                        "fontFamily": MONO,
+                        "fontSize": 10,
+                        "letterSpacing": 0.3,
+                        "marginLeft": 16,
+                        "fontStyle": "italic",
+                        "flex": 1,
+                        "minWidth": 0,
+                        "overflow": "hidden",
+                        "textOverflow": "ellipsis",
+                        "whiteSpace": "nowrap",
+                    },
+                ),
+                html.A(
+                    "?  LEARN",
+                    href="/learn",
+                    target="_blank",
+                    style={
+                        "marginLeft": "auto",
+                        "color": ORANGE,
+                        "fontFamily": MONO,
+                        "fontSize": 11,
+                        "letterSpacing": 1,
+                        "textDecoration": "none",
+                        "padding": "4px 12px",
+                        "border": f"1px solid {BORDER_BRIGHT}",
+                    },
                 ),
             ],
         ),
@@ -292,24 +309,41 @@ app.layout = html.Div(
 )
 
 
-def _build_header_cells(grid, nodes):
+def _build_header_cells(grid, nodes, reshuffle_age=None):
     if grid is None:
         return [_hdr_cell("SPOT", "—"), _hdr_cell("KING", "—")]
     spot_str = f"${grid.spot:,.2f}"
-    king_str = f"{nodes.king.strike:g}" if nodes and nodes.king else "—"
-    king_val = f"${nodes.king.value:+,.0f}K" if nodes and nodes.king else ""
+    king = nodes.king if nodes else None
+    is_reshuffled = reshuffle_age is not None and reshuffle_age < 120
+
+    if king is None:
+        king_str, king_val = "—", ""
+        king_color, val_color = TEXT_DIM, TEXT_DIM
+    elif not king.significant:
+        king_str = f"{king.strike:g}"
+        king_val = "no clear leader"
+        king_color = TEXT_DIM
+        val_color = TEXT_DIM
+    else:
+        king_str = f"{king.strike:g}"
+        king_val = f"${king.value:+,.0f}K"
+        king_color = AMBER
+        val_color = GREEN if king.value > 0 else RED
+
     ts_str = datetime.fromtimestamp(grid.timestamp).strftime("%H:%M:%S")
-    return [
+    cells = [
         _hdr_cell("SPOT", spot_str, value_color=CYAN),
-        _hdr_cell("KING STRIKE", king_str, value_color=AMBER),
-        _hdr_cell("KING VALUE", king_val,
-                  value_color=GREEN if nodes and nodes.king and nodes.king.value > 0 else RED),
-        _hdr_cell("UPDATED", ts_str, value_color=TEXT),
-        _hdr_cell("TICKER", grid.ticker, value_color=ORANGE),
+        _hdr_cell("KING STRIKE", king_str, value_color=king_color),
+        _hdr_cell("KING VALUE", king_val, value_color=val_color),
     ]
+    if is_reshuffled:
+        cells.append(_hdr_cell("RESHUFFLED", f"{int(reshuffle_age)}s ago", value_color=YELLOW))
+    cells.append(_hdr_cell("UPDATED", ts_str, value_color=TEXT))
+    cells.append(_hdr_cell("TICKER", grid.ticker, value_color=ORANGE))
+    return cells
 
 
-def _format_status_bar(grid, nodes, mode, ticker):
+def _format_status_bar(grid, nodes, mode, ticker, reshuffle_age=None):
     parts = []
     parts.append(html.Span(
         f"{ticker:>6}",
@@ -318,16 +352,32 @@ def _format_status_bar(grid, nodes, mode, ticker):
     parts.append(html.Span(f"MODE {MODE_LABELS.get(mode, mode).upper():<10}",
                            style={"color": TEXT_DIM, "marginRight": 12}))
     if nodes and nodes.king:
-        parts.append(html.Span(
-            f"KING {nodes.king.strike:>6g} @ {nodes.king.expiry}",
-            style={"color": AMBER, "marginRight": 12},
-        ))
-        v_color = GREEN if nodes.king.value > 0 else RED
-        parts.append(html.Span(
-            f"{nodes.king.value:+,.0f}K",
-            style={"color": v_color, "marginRight": 16, "fontWeight": 700},
-        ))
-    if nodes and nodes.gatekeepers:
+        king = nodes.king
+        if not king.significant:
+            parts.append(html.Span(
+                f"KING {king.strike:>6g}",
+                style={"color": TEXT_DIM, "marginRight": 8},
+            ))
+            parts.append(html.Span(
+                "(no clear leader)",
+                style={"color": TEXT_DIM, "marginRight": 16, "fontStyle": "italic"},
+            ))
+        else:
+            parts.append(html.Span(
+                f"KING {king.strike:>6g} @ {king.expiry}",
+                style={"color": AMBER, "marginRight": 12},
+            ))
+            v_color = GREEN if king.value > 0 else RED
+            parts.append(html.Span(
+                f"{king.value:+,.0f}K",
+                style={"color": v_color, "marginRight": 16, "fontWeight": 700},
+            ))
+        if reshuffle_age is not None and reshuffle_age < 120:
+            parts.append(html.Span(
+                f"⚠ RESHUFFLED {int(reshuffle_age)}s ago  ",
+                style={"color": YELLOW, "marginRight": 12, "fontWeight": 700},
+            ))
+    if nodes and nodes.gatekeepers and (not nodes.king or nodes.king.significant):
         parts.append(html.Span("GATEKEEPERS ", style={"color": TEXT_DIM, "marginRight": 4}))
         for g in nodes.gatekeepers[:3]:
             col = GREEN if g.value > 0 else RED
@@ -343,6 +393,7 @@ def _format_status_bar(grid, nodes, mode, ticker):
         Output("heatmap-graph", "figure"),
         Output("header-cells", "children"),
         Output("node-summary", "children"),
+        Output("mode-blurb", "children"),
     ],
     [
         Input("poll", "n_intervals"),
@@ -351,6 +402,7 @@ def _format_status_bar(grid, nodes, mode, ticker):
     ],
 )
 def _update(_n, ticker, mode):
+    blurb = MODE_BLURBS.get(mode, "")
     if ticker == "TRINITY":
         for t in ("SPY", "SPX", "QQQ"):
             try:
@@ -364,7 +416,13 @@ def _update(_n, ticker, mode):
             nodes = _cache.get_nodes(t)
             if grid is not None:
                 break
-        return fig, _build_header_cells(grid, nodes), _format_status_bar(grid, nodes, mode, "TRINITY")
+        reshuffle_age = _cache.king_reshuffle_age(t) if grid else None
+        return (
+            fig,
+            _build_header_cells(grid, nodes, reshuffle_age),
+            _format_status_bar(grid, nodes, mode, "TRINITY", reshuffle_age),
+            blurb,
+        )
 
     try:
         grid, nodes = _refresh_cache_for(ticker)
@@ -373,8 +431,14 @@ def _update(_n, ticker, mode):
         grid = _cache.get_grid(ticker)
         nodes = _cache.get_nodes(ticker)
 
+    reshuffle_age = _cache.king_reshuffle_age(ticker)
     fig = _build_heatmap_figure(grid, nodes, mode)
-    return fig, _build_header_cells(grid, nodes), _format_status_bar(grid, nodes, mode, ticker)
+    return (
+        fig,
+        _build_header_cells(grid, nodes, reshuffle_age),
+        _format_status_bar(grid, nodes, mode, ticker, reshuffle_age),
+        blurb,
+    )
 
 
 if __name__ == "__main__":
