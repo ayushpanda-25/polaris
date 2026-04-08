@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+
+# Virtual envs
+venv/
+env/
+.venv/
+
+# Polaris-specific
+data/*.db
+data/*.db-journal
+data/*.pkl
+*.pkl
+/tmp/
+
+# Skylit screenshots — these are personal captures
+tests/fixtures/skylit_screenshots/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Vercel
+.vercel/
+
+# Logs
+*.log
+nohup.out
+
+# Don't commit launch.json which has user-specific paths
+.claude/launch.json
