@@ -33,6 +33,11 @@ if __package__ in (None, ""):
     from src.memory_cache import get_cache
     from src.node_classifier import NodeMap
     from src.sqlite_writer import SQLiteWriter
+    from src.staleness import (
+        FreshnessState,
+        evaluate_freshness,
+        latest_cache_timestamp,
+    )
     import config as app_config
 else:
     from .compute_loop import ComputeLoop
@@ -41,20 +46,51 @@ else:
     from .memory_cache import get_cache
     from .node_classifier import NodeMap
     from .sqlite_writer import SQLiteWriter
+    from .staleness import (
+        FreshnessState,
+        evaluate_freshness,
+        latest_cache_timestamp,
+    )
     import importlib
     app_config = importlib.import_module("config")
 
 
-# --------------- Colorscale tuned to Skylit ---------------
-# Negative = blue → dark purple, Positive = green → yellow
+# ════════════════════════════════════════════════════════════════════
+#  BLOOMBERG-STYLE THEME
+# ════════════════════════════════════════════════════════════════════
+BG_BLACK = "#000000"
+BG_PANEL = "#0a0a0a"
+BG_ROW = "#0d0d0d"
+BORDER = "#1a1a1a"
+BORDER_BRIGHT = "#2a2a2a"
+
+ORANGE = "#fa8c00"          # Bloomberg primary
+ORANGE_DIM = "#7a4400"
+AMBER = "#ffb627"           # accent / king node
+WHITE = "#ffffff"
+TEXT = "#d4d4d4"
+TEXT_DIM = "#7a7a7a"
+CYAN = "#00b4d8"            # tickers / numerics
+GREEN = "#00ff7f"           # positive / live
+RED = "#ff3333"             # negative / stale
+YELLOW = "#ffd60a"
+
+MONO = "'JetBrains Mono', 'IBM Plex Mono', 'Menlo', 'Consolas', monospace"
+
+# Bloomberg-style heatmap colorscale:
+#   Strong negative → deep red
+#   Mid negative   → dark red
+#   Near zero      → black
+#   Mid positive   → dim amber
+#   Strong positive→ bright orange/amber (King Node territory)
 SKYLIT_COLORSCALE = [
-    [0.00, "#2b0b3a"],  # deep purple (strong negative)
-    [0.25, "#3a1654"],
-    [0.45, "#1e3a5f"],  # blue
-    [0.50, "#1b2838"],  # near-zero neutral
-    [0.55, "#1e5f3a"],  # green
-    [0.75, "#3a8f4f"],
-    [1.00, "#e8d936"],  # bright yellow (strong positive)
+    [0.00, "#660000"],   # deepest red (most negative GEX)
+    [0.20, "#990000"],
+    [0.40, "#3a0a0a"],
+    [0.50, "#000000"],   # zero
+    [0.60, "#3a2a00"],
+    [0.80, "#a86600"],
+    [1.00, "#fa8c00"],   # bright Bloomberg orange (King Node)
 ]
 
 
@@ -71,9 +107,12 @@ def _build_heatmap_figure(grid: GEXGrid, nodes: NodeMap, mode: str = "gex") -> g
         return go.Figure(
             layout=go.Layout(
                 template="plotly_dark",
-                title="(no data yet — priming cache)",
-                paper_bgcolor="#0b0f17",
-                plot_bgcolor="#0b0f17",
+                title=dict(
+                    text="<NO DATA — PRIMING CACHE>",
+                    font=dict(family=MONO, size=14, color=ORANGE),
+                ),
+                paper_bgcolor=BG_BLACK,
+                plot_bgcolor=BG_BLACK,
             )
         )
 
@@ -82,113 +121,168 @@ def _build_heatmap_figure(grid: GEXGrid, nodes: NodeMap, mode: str = "gex") -> g
     # Trim to ±3% window around spot for readability
     spot = grid.spot
     lo, hi = spot * 0.97, spot * 1.03
-    keep = [i for i, s in enumerate(strikes) if lo <= s <= hi]
-    if keep:
-        strikes = [strikes[i] for i in keep]
-        mat = mat[keep, :]
+    keep_strikes = [i for i, s in enumerate(strikes) if lo <= s <= hi]
+    if keep_strikes:
+        strikes = [strikes[i] for i in keep_strikes]
+        mat = mat[keep_strikes, :]
+
+    # Limit to first 6 expiries for readability (Skylit shows 5)
+    if len(expiries) > 6:
+        expiries = expiries[:6]
+        mat = mat[:, :6]
+
+    # Format expiry headers as MM-DD for compactness
+    def _format_exp(e: str) -> str:
+        try:
+            return datetime.fromisoformat(e).strftime("%b %-d")
+        except Exception:
+            return e
+    expiry_labels = [_format_exp(e) for e in expiries]
+    strike_labels = [f"{s:g}" for s in strikes]
 
     # Cap the color scale at a percentile to suppress outliers.
-    # Color (∂Γ/∂t) has extreme spikes near 0DTE that drown out the rest
-    # of the grid; use a tighter percentile for that mode.
     nz = np.abs(mat[mat != 0])
     if nz.size == 0:
         vmax = 1.0
     elif mode == "color":
-        vmax = float(np.percentile(nz, 75))  # tighter for color
+        vmax = float(np.percentile(nz, 75))
     else:
         vmax = float(np.percentile(nz, 95))
     if vmax == 0:
         vmax = 1.0
 
-    # Only label the top-K cells by magnitude per column (Skylit does this).
-    # That way each expiry column has 4-5 labeled cells spread vertically,
-    # instead of the first column hoarding all labels.
-    show_label = np.zeros_like(mat, dtype=bool)
-    per_col = 6
-    for j in range(mat.shape[1]):
-        col = np.abs(mat[:, j])
-        if col.sum() == 0:
-            continue
-        top_rows = np.argsort(col)[::-1][:per_col]
-        for i in top_rows:
-            if col[i] > 0:
-                show_label[i, j] = True
+    # Format every cell value compactly. Skylit labels EVERY cell — and we
+    # can too now that columns are equal-width. For values < $1k, hide.
+    def _fmt(v: float) -> str:
+        if abs(v) < 0.5:
+            return ""
+        if abs(v) >= 1000:
+            return f"${v / 1000:,.1f}M"
+        return f"${v:,.0f}K"
+
+    text_grid = [[_fmt(mat[i, j]) for j in range(mat.shape[1])]
+                 for i in range(mat.shape[0])]
 
     mode_label = MODE_LABELS.get(mode, mode.upper())
 
     # Symmetric scale around zero
     heat = go.Heatmap(
         z=mat,
-        x=expiries,
-        y=strikes,
+        x=expiry_labels,
+        y=strike_labels,
         zmin=-vmax,
         zmax=vmax,
         colorscale=SKYLIT_COLORSCALE,
         colorbar=dict(
-            title=dict(text=f"{mode_label} ($k)", side="right"),
-            thickness=14,
-            len=0.9,
+            title=dict(
+                text=f"{mode_label}",
+                side="right",
+                font=dict(family=MONO, size=10, color=ORANGE),
+            ),
+            thickness=10,
+            len=0.85,
+            outlinewidth=0,
+            tickfont=dict(family=MONO, size=9, color=TEXT_DIM),
+            bgcolor=BG_BLACK,
         ),
         hovertemplate=(
-            "Strike: %{y}<br>"
-            "Expiry: %{x}<br>"
-            f"{mode_label}: $%{{z:.1f}}k"
-            "<extra></extra>"
+            "<span style='font-family:monospace'>"
+            "STRIKE  %{y}<br>"
+            "EXPIRY  %{x}<br>"
+            f"{mode_label.upper()}    $%{{z:,.1f}}K"
+            "</span><extra></extra>"
         ),
-        text=[
-            [f"${mat[i, j]:,.0f}K" if show_label[i, j] else ""
-             for j in range(mat.shape[1])]
-            for i in range(mat.shape[0])
-        ],
+        text=text_grid,
         texttemplate="%{text}",
-        textfont=dict(size=9, color="#e8eef8", family="monospace"),
+        textfont=dict(size=10, color=TEXT, family=MONO),
+        xgap=1,
+        ygap=1,
     )
 
     fig = go.Figure(data=[heat])
 
-    # King node marker
+    # King node marker — Bloomberg-style: amber square outline, no decoration
     if nodes and nodes.king is not None:
-        fig.add_trace(
-            go.Scatter(
-                x=[nodes.king.expiry],
-                y=[nodes.king.strike],
-                mode="markers+text",
-                marker=dict(symbol="star", size=18, color="#f9d649",
-                            line=dict(width=1.5, color="#1b1b1b")),
-                text=["♛"],
-                textposition="top center",
-                textfont=dict(size=14, color="#f9d649"),
-                name="King Node",
-                hovertemplate=(
-                    f"<b>King Node</b><br>"
-                    f"Strike: {nodes.king.strike}<br>"
-                    f"Expiry: {nodes.king.expiry}<br>"
-                    f"GEX: ${nodes.king.value:,.0f}k<extra></extra>"
-                ),
+        king_x_label = _format_exp(nodes.king.expiry)
+        king_y_label = f"{nodes.king.strike:g}"
+        if king_x_label in expiry_labels and king_y_label in strike_labels:
+            fig.add_trace(
+                go.Scatter(
+                    x=[king_x_label],
+                    y=[king_y_label],
+                    mode="markers",
+                    marker=dict(
+                        symbol="square-open",
+                        size=26,
+                        color=AMBER,
+                        line=dict(width=2.5, color=AMBER),
+                    ),
+                    name="King Node",
+                    showlegend=False,
+                    hovertemplate=(
+                        f"<span style='font-family:monospace'>"
+                        f"<b>KING NODE</b><br>"
+                        f"STRIKE  {nodes.king.strike}<br>"
+                        f"EXPIRY  {nodes.king.expiry}<br>"
+                        f"VALUE   ${nodes.king.value:,.0f}K"
+                        f"</span><extra></extra>"
+                    ),
+                )
             )
-        )
 
-    # Spot price horizontal reference
-    fig.add_hline(
-        y=grid.spot,
-        line=dict(color="#9cc4ff", width=1, dash="dot"),
-        annotation_text=f"spot {grid.spot:.2f}",
-        annotation_position="top left",
-        annotation_font_color="#9cc4ff",
-    )
+    # Spot price horizontal reference line
+    if strike_labels:
+        spot_strike_idx = min(
+            range(len(strikes)),
+            key=lambda i: abs(strikes[i] - grid.spot),
+        )
+        fig.add_shape(
+            type="line",
+            xref="paper", yref="y",
+            x0=0, x1=1,
+            y0=spot_strike_idx, y1=spot_strike_idx,
+            line=dict(color=CYAN, width=1, dash="dot"),
+        )
+        fig.add_annotation(
+            xref="paper", yref="y",
+            x=1, y=spot_strike_idx,
+            text=f"SPOT {grid.spot:.2f}  ",
+            showarrow=False,
+            xanchor="right",
+            yanchor="bottom",
+            font=dict(color=CYAN, size=10, family=MONO),
+        )
 
     fig.update_layout(
         template="plotly_dark",
-        title=dict(
-            text=f"{grid.ticker} — {mode_label} Heatmap  ·  spot ${grid.spot:.2f}",
-            font=dict(size=16),
+        showlegend=False,
+        paper_bgcolor=BG_BLACK,
+        plot_bgcolor=BG_BLACK,
+        xaxis=dict(
+            title="",
+            tickangle=0,
+            type="category",
+            side="top",
+            tickfont=dict(size=10, color=ORANGE, family=MONO),
+            showgrid=False,
+            showline=True,
+            linecolor=BORDER_BRIGHT,
+            linewidth=1,
+            zeroline=False,
         ),
-        paper_bgcolor="#0b0f17",
-        plot_bgcolor="#0b0f17",
-        xaxis=dict(title="Expiry", tickangle=-30),
-        yaxis=dict(title="Strike", autorange="reversed"),
-        height=720,
-        margin=dict(l=70, r=40, t=60, b=80),
+        yaxis=dict(
+            title="",
+            autorange="reversed",
+            type="category",
+            tickfont=dict(size=10, color=ORANGE, family=MONO),
+            showgrid=False,
+            showline=True,
+            linecolor=BORDER_BRIGHT,
+            linewidth=1,
+            zeroline=False,
+        ),
+        height=680,
+        margin=dict(l=70, r=70, t=40, b=20),
     )
     return fig
 
@@ -204,44 +298,98 @@ def _build_trinity_figure(cache, mode: str = "gex") -> go.Figure:
         horizontal_spacing=0.06,
     )
 
+    def _trinity_format_exp(e: str) -> str:
+        try:
+            return datetime.fromisoformat(e).strftime("%b %-d")
+        except Exception:
+            return e
+
     for idx, tkr in enumerate(trinity_tickers, start=1):
         grid = cache.get_grid(tkr)
         nodes = cache.get_nodes(tkr)
         if grid is None or not grid.cells:
             continue
         mat, strikes, expiries = grid.as_matrix(mode)
+
+        # Trim ±3% strike window
+        spot = grid.spot
+        lo, hi = spot * 0.97, spot * 1.03
+        keep = [i for i, s in enumerate(strikes) if lo <= s <= hi]
+        if keep:
+            strikes = [strikes[i] for i in keep]
+            mat = mat[keep, :]
+
+        # Limit to first 5 expiries
+        if len(expiries) > 5:
+            expiries = expiries[:5]
+            mat = mat[:, :5]
+
+        exp_labels = [_trinity_format_exp(e) for e in expiries]
+        strike_labels = [f"{s:g}" for s in strikes]
+
         nz = np.abs(mat[mat != 0])
         vmax = float(np.percentile(nz, 95)) if nz.size else 1.0
+        if vmax == 0:
+            vmax = 1.0
+
         fig.add_trace(
             go.Heatmap(
-                z=mat, x=expiries, y=strikes,
+                z=mat,
+                x=exp_labels,
+                y=strike_labels,
                 zmin=-vmax, zmax=vmax,
                 colorscale=SKYLIT_COLORSCALE,
                 showscale=(idx == 3),
+                xgap=2, ygap=2,
                 hovertemplate=f"{tkr}<br>Strike %{{y}}<br>Expiry %{{x}}<br>{MODE_LABELS.get(mode, mode.upper())} $%{{z:.0f}}k<extra></extra>",
             ),
             row=1, col=idx,
         )
         if nodes and nodes.king is not None:
-            fig.add_trace(
-                go.Scatter(
-                    x=[nodes.king.expiry], y=[nodes.king.strike],
-                    mode="markers", marker=dict(symbol="star", size=14, color="#f9d649"),
-                    showlegend=False,
-                ),
-                row=1, col=idx,
-            )
+            kx = _trinity_format_exp(nodes.king.expiry)
+            ky = f"{nodes.king.strike:g}"
+            if kx in exp_labels and ky in strike_labels:
+                fig.add_trace(
+                    go.Scatter(
+                        x=[kx], y=[ky],
+                        mode="markers",
+                        marker=dict(symbol="star", size=18, color="#f9d649",
+                                    line=dict(width=1.5, color="#1b1b1b")),
+                        showlegend=False,
+                    ),
+                    row=1, col=idx,
+                )
 
     fig.update_layout(
         template="plotly_dark",
-        paper_bgcolor="#0b0f17",
-        plot_bgcolor="#0b0f17",
-        height=680,
-        title=f"Trinity Mode — {MODE_LABELS.get(mode, mode.upper())}",
-        margin=dict(l=50, r=50, t=80, b=60),
+        showlegend=False,
+        paper_bgcolor=BG_BLACK,
+        plot_bgcolor=BG_BLACK,
+        height=660,
+        title=dict(
+            text=f"TRINITY  ·  {MODE_LABELS.get(mode, mode.upper()).upper()}",
+            font=dict(family=MONO, size=11, color=ORANGE),
+            x=0.01,
+            xanchor="left",
+        ),
+        margin=dict(l=50, r=70, t=50, b=20),
     )
+    # Tone subplot titles to Bloomberg style
+    for i, ann in enumerate(fig.layout.annotations):
+        ann.font = dict(family=MONO, size=11, color=ORANGE)
     for i in range(1, 4):
-        fig.update_yaxes(autorange="reversed", row=1, col=i)
+        fig.update_xaxes(
+            type="category", side="top",
+            tickfont=dict(size=9, color=ORANGE, family=MONO),
+            showgrid=False, showline=True, linecolor=BORDER_BRIGHT,
+            row=1, col=i,
+        )
+        fig.update_yaxes(
+            type="category", autorange="reversed",
+            tickfont=dict(size=9, color=ORANGE, family=MONO),
+            showgrid=False, showline=True, linecolor=BORDER_BRIGHT,
+            row=1, col=i,
+        )
     return fig
 
 
@@ -250,59 +398,273 @@ def _build_trinity_figure(cache, mode: str = "gex") -> go.Figure:
 def create_app(cache, tickers: list[str]) -> Dash:
     app = Dash(__name__, title="Polaris")
 
+    # Reusable cell builders ---------------------------------------
+    def _hdr_cell(label, value, color=ORANGE, value_color=None):
+        return html.Div(
+            style={
+                "display": "flex",
+                "flexDirection": "column",
+                "padding": "0 16px",
+                "borderRight": f"1px solid {BORDER_BRIGHT}",
+                "minWidth": 90,
+                "justifyContent": "center",
+            },
+            children=[
+                html.Div(label, style={
+                    "fontSize": 9,
+                    "color": TEXT_DIM,
+                    "letterSpacing": 1.2,
+                    "fontFamily": MONO,
+                    "textTransform": "uppercase",
+                }),
+                html.Div(value, id=f"hdr-{label.lower().replace(' ', '-')}", style={
+                    "fontSize": 13,
+                    "color": value_color or color,
+                    "fontFamily": MONO,
+                    "fontWeight": 600,
+                    "marginTop": 2,
+                }),
+            ],
+        )
+
+    def _func_btn(label, value, selected=False):
+        return {
+            "label": html.Span(
+                label,
+                style={
+                    "padding": "4px 12px",
+                    "marginRight": 4,
+                    "fontFamily": MONO,
+                    "fontSize": 11,
+                    "letterSpacing": 0.8,
+                    "color": TEXT,
+                    "backgroundColor": BG_PANEL,
+                    "border": f"1px solid {BORDER_BRIGHT}",
+                    "cursor": "pointer",
+                    "display": "inline-block",
+                },
+            ),
+            "value": value,
+        }
+
     app.layout = html.Div(
         style={
-            "backgroundColor": "#0b0f17",
-            "color": "#e8eef8",
+            "backgroundColor": BG_BLACK,
+            "color": TEXT,
             "minHeight": "100vh",
-            "fontFamily": "-apple-system, system-ui, sans-serif",
-            "padding": "16px 24px",
+            "fontFamily": MONO,
+            "padding": 0,
+            "margin": 0,
         },
         children=[
+            # ═══ TOP BAR (Bloomberg-style) ═══
             html.Div(
-                style={"display": "flex", "alignItems": "center", "justifyContent": "space-between"},
+                style={
+                    "display": "flex",
+                    "alignItems": "stretch",
+                    "borderBottom": f"2px solid {ORANGE}",
+                    "backgroundColor": BG_BLACK,
+                    "height": 56,
+                },
                 children=[
-                    html.H2("★  Polaris", style={"margin": 0, "color": "#f9d649"}),
-                    html.Div(id="last-update", style={"color": "#9cc4ff", "fontSize": 13}),
+                    # Brand
+                    html.Div(
+                        style={
+                            "display": "flex",
+                            "alignItems": "center",
+                            "padding": "0 18px",
+                            "borderRight": f"1px solid {BORDER_BRIGHT}",
+                            "backgroundColor": BG_BLACK,
+                        },
+                        children=[
+                            html.Span("★", style={
+                                "fontSize": 18,
+                                "color": ORANGE,
+                                "marginRight": 10,
+                            }),
+                            html.Span("POLARIS", style={
+                                "fontSize": 16,
+                                "color": ORANGE,
+                                "fontWeight": 700,
+                                "letterSpacing": 2,
+                                "fontFamily": MONO,
+                            }),
+                            html.Span(" · DEALER GEX TERMINAL", style={
+                                "fontSize": 9,
+                                "color": TEXT_DIM,
+                                "marginLeft": 8,
+                                "letterSpacing": 1,
+                            }),
+                        ],
+                    ),
+                    # Header data cells (populated by callback)
+                    html.Div(
+                        id="header-cells",
+                        style={"display": "flex", "flexGrow": 1, "alignItems": "stretch"},
+                    ),
+                    # Freshness badge — far right
+                    html.Div(
+                        id="freshness-badge",
+                        style={
+                            "display": "flex",
+                            "alignItems": "center",
+                            "padding": "0 18px",
+                            "borderLeft": f"1px solid {BORDER_BRIGHT}",
+                            "backgroundColor": BG_BLACK,
+                            "fontFamily": MONO,
+                            "fontSize": 11,
+                            "letterSpacing": 0.5,
+                        },
+                    ),
                 ],
             ),
+
+            # ═══ FUNCTION BAR (controls) ═══
             html.Div(
-                style={"marginTop": 16, "display": "flex", "gap": 12, "alignItems": "center"},
+                style={
+                    "display": "flex",
+                    "alignItems": "center",
+                    "padding": "8px 18px",
+                    "borderBottom": f"1px solid {BORDER_BRIGHT}",
+                    "backgroundColor": BG_PANEL,
+                    "gap": 16,
+                },
                 children=[
+                    html.Span("TICKER", style={
+                        "fontSize": 9,
+                        "color": TEXT_DIM,
+                        "letterSpacing": 1.2,
+                        "marginRight": 4,
+                    }),
                     dcc.Dropdown(
                         id="ticker-select",
-                        options=[{"label": t, "value": t} for t in tickers] + [{"label": "TRINITY", "value": "TRINITY"}],
+                        options=[{"label": t, "value": t} for t in tickers]
+                                + [{"label": "TRINITY", "value": "TRINITY"}],
                         value="SPY",
                         clearable=False,
-                        style={"width": 180, "color": "#111"},
+                        style={
+                            "width": 140,
+                            "color": "#111",
+                            "fontFamily": MONO,
+                            "fontSize": 12,
+                        },
                     ),
+                    html.Span("MODE", style={
+                        "fontSize": 9,
+                        "color": TEXT_DIM,
+                        "letterSpacing": 1.2,
+                        "marginLeft": 12,
+                        "marginRight": 4,
+                    }),
                     dcc.RadioItems(
                         id="mode-select",
                         options=[
                             {"label": " GEX ", "value": "gex"},
                             {"label": " GEX·√T ", "value": "gex_norm"},
                             {"label": " VEX ", "value": "vex"},
-                            {"label": " Color ", "value": "color"},
+                            {"label": " Δ\u0393/Δt ", "value": "color"},
                         ],
                         value="gex",
-                        labelStyle={"display": "inline-block", "marginRight": 14},
-                        inputStyle={"marginRight": 5},
+                        labelStyle={
+                            "display": "inline-block",
+                            "marginRight": 14,
+                            "color": ORANGE,
+                            "fontSize": 11,
+                            "fontFamily": MONO,
+                            "letterSpacing": 1,
+                            "cursor": "pointer",
+                        },
+                        inputStyle={"marginRight": 4, "accentColor": ORANGE},
                     ),
                 ],
             ),
-            dcc.Graph(id="heatmap-graph", style={"marginTop": 16}),
+
+            # ═══ STALE BANNER (only when stale/offline) ═══
+            html.Div(id="stale-banner"),
+
+            # ═══ MAIN HEATMAP ═══
+            html.Div(
+                style={"padding": "8px 18px 0 18px"},
+                children=[dcc.Graph(id="heatmap-graph", config={"displaylogo": False})],
+            ),
+
+            # ═══ STATUS BAR (bottom) ═══
             html.Div(
                 id="node-summary",
-                style={"marginTop": 8, "color": "#9cc4ff", "fontSize": 13},
+                style={
+                    "padding": "8px 18px",
+                    "borderTop": f"1px solid {BORDER_BRIGHT}",
+                    "backgroundColor": BG_PANEL,
+                    "fontFamily": MONO,
+                    "fontSize": 11,
+                    "color": TEXT,
+                    "letterSpacing": 0.5,
+                },
             ),
+
             dcc.Interval(id="poll", interval=app_config.DASHBOARD_POLL * 1000, n_intervals=0),
         ],
     )
 
+    def _build_freshness_badge(status):
+        """Bloomberg-style status pill in the top right."""
+        dot_color = status.color
+        return [
+            html.Span("●", style={"color": dot_color, "marginRight": 8, "fontSize": 12}),
+            html.Span(status.label, style={
+                "color": dot_color, "fontWeight": 700, "marginRight": 8,
+            }),
+            html.Span(
+                status.message.replace("Live · ", "").split(" — ")[0]
+                    if status.state == FreshnessState.LIVE
+                    else status.message.split(" — ")[0],
+                style={"color": TEXT_DIM},
+            ),
+        ]
+
+    def _build_stale_banner(status):
+        """Full-width stripe for STALE / OFFLINE states."""
+        if status.state in (FreshnessState.LIVE, FreshnessState.LAGGING):
+            return None
+        return html.Div(
+            style={
+                "padding": "10px 18px",
+                "backgroundColor": "#1a0000" if status.state == FreshnessState.STALE else "#0f0f0f",
+                "borderTop": f"1px solid {status.color}",
+                "borderBottom": f"1px solid {status.color}",
+                "color": status.color,
+                "fontFamily": MONO,
+                "fontSize": 12,
+                "fontWeight": 700,
+                "letterSpacing": 1,
+                "textAlign": "center",
+            },
+            children=status.message.upper(),
+        )
+
+    def _build_header_cells(grid, nodes):
+        """The Bloomberg-style header data row."""
+        if grid is None:
+            return [_hdr_cell("SPOT", "—"), _hdr_cell("KING", "—"), _hdr_cell("TIME", "—")]
+        spot_str = f"${grid.spot:,.2f}"
+        king_str = f"{nodes.king.strike:g}" if nodes and nodes.king else "—"
+        king_val = f"${nodes.king.value:+,.0f}K" if nodes and nodes.king else ""
+        ts_str = datetime.fromtimestamp(grid.timestamp).strftime("%H:%M:%S")
+        return [
+            _hdr_cell("SPOT", spot_str, color=CYAN),
+            _hdr_cell("KING STRIKE", king_str, color=AMBER),
+            _hdr_cell("KING VALUE", king_val,
+                      color=GREEN if nodes and nodes.king and nodes.king.value > 0 else RED),
+            _hdr_cell("UPDATED", ts_str, color=TEXT),
+            _hdr_cell("TICKER", grid.ticker, color=ORANGE),
+        ]
+
     @app.callback(
         [
             Output("heatmap-graph", "figure"),
-            Output("last-update", "children"),
+            Output("freshness-badge", "children"),
+            Output("stale-banner", "children"),
+            Output("header-cells", "children"),
             Output("node-summary", "children"),
         ],
         [
@@ -312,34 +674,67 @@ def create_app(cache, tickers: list[str]) -> Dash:
         ],
     )
     def _update(_n, ticker, mode):
+        latest_ts = latest_cache_timestamp(cache)
+        status = evaluate_freshness(latest_ts)
+        badge = _build_freshness_badge(status)
+        banner = _build_stale_banner(status)
+
         if ticker == "TRINITY":
             fig = _build_trinity_figure(cache, mode)
-            ts = time.strftime("%H:%M:%S")
-            return fig, f"Last update: {ts}", ""
+            # Use first available ticker for header info in trinity mode
+            for t in ("SPY", "SPX", "QQQ"):
+                grid = cache.get_grid(t)
+                nodes = cache.get_nodes(t)
+                if grid is not None:
+                    break
+            header = _build_header_cells(grid, nodes)
+            status_bar = self_format_status_bar(grid, nodes, mode, "TRINITY")
+            return fig, badge, banner, header, status_bar
 
         grid = cache.get_grid(ticker)
         nodes = cache.get_nodes(ticker)
         fig = _build_heatmap_figure(grid, nodes, mode)
+        header = _build_header_cells(grid, nodes)
+        status_bar = self_format_status_bar(grid, nodes, mode, ticker)
 
-        if grid:
-            ts = datetime.fromtimestamp(grid.timestamp).strftime("%H:%M:%S")
-            last = f"Last update: {ts}  ·  spot ${grid.spot:.2f}"
-        else:
-            last = "Last update: —"
+        return fig, badge, banner, header, status_bar
 
-        summary_parts = []
+    def self_format_status_bar(grid, nodes, mode, ticker):
+        """Bloomberg-style bottom status bar with monospace fixed-width fields."""
+        parts = []
+        parts.append(html.Span(
+            f"{ticker:>6}",
+            style={"color": ORANGE, "marginRight": 12, "fontWeight": 700},
+        ))
+        parts.append(html.Span(f"MODE {MODE_LABELS.get(mode, mode).upper():<10}",
+                               style={"color": TEXT_DIM, "marginRight": 12}))
         if nodes and nodes.king:
-            summary_parts.append(
-                f"♛ King: {nodes.king.strike} @ {nodes.king.expiry}  ·  ${nodes.king.value:,.0f}k"
-            )
+            parts.append(html.Span(
+                f"KING {nodes.king.strike:>6g} @ {nodes.king.expiry}",
+                style={"color": AMBER, "marginRight": 12},
+            ))
+            v_color = GREEN if nodes.king.value > 0 else RED
+            parts.append(html.Span(
+                f"{nodes.king.value:+,.0f}K",
+                style={"color": v_color, "marginRight": 16, "fontWeight": 700},
+            ))
         if nodes and nodes.gatekeepers:
-            gk = ", ".join(
-                f"{g.strike}({g.value:+.0f}k)" for g in nodes.gatekeepers[:3]
-            )
-            summary_parts.append(f"Gatekeepers: {gk}")
-        summary = "  ·  ".join(summary_parts) if summary_parts else "(no nodes yet)"
-
-        return fig, last, summary
+            gk_strs = []
+            for g in nodes.gatekeepers[:3]:
+                col = GREEN if g.value > 0 else RED
+                gk_strs.append(html.Span(
+                    f"{g.strike:g} ",
+                    style={"color": ORANGE},
+                ))
+                gk_strs.append(html.Span(
+                    f"{g.value:+,.0f}K  ",
+                    style={"color": col},
+                ))
+            parts.append(html.Span("GATEKEEPERS ", style={"color": TEXT_DIM, "marginRight": 4}))
+            parts.extend(gk_strs)
+        if not (nodes and (nodes.king or nodes.gatekeepers)):
+            parts.append(html.Span("(awaiting data)", style={"color": TEXT_DIM}))
+        return parts
 
     return app
 

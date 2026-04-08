@@ -12,25 +12,30 @@ This file is ONLY for the public Vercel deployment.
 from __future__ import annotations
 
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 
 # Make project modules importable
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import dash
-import numpy as np
-import plotly.graph_objects as go
 from dash import Dash, Input, Output, dcc, html
 
-from src.compute_loop import ComputeLoop  # noqa: F401  (kept for parity)
 from src.data_feed import SyntheticOptionsFeed
 from src.gex_engine import compute_grid
 from src.node_classifier import classify_nodes
 from src.dashboard import (
+    AMBER,
+    BG_BLACK,
+    BG_PANEL,
+    BORDER_BRIGHT,
+    CYAN,
+    GREEN,
     MODE_LABELS,
-    SKYLIT_COLORSCALE,
+    MONO,
+    ORANGE,
+    RED,
+    TEXT,
+    TEXT_DIM,
     _build_heatmap_figure,
     _build_trinity_figure,
 )
@@ -45,7 +50,6 @@ _cache = GEXCache()
 
 
 def _refresh_cache_for(ticker: str):
-    """Pull a fresh snapshot for one ticker and update the in-memory cache."""
     snap = _feed.get_chain_snapshot(ticker)
     grid = compute_grid(
         ticker=snap.ticker,
@@ -58,7 +62,7 @@ def _refresh_cache_for(ticker: str):
     return grid, nodes
 
 
-# Pre-warm the cache for all tickers at cold start
+# Pre-warm cache for all tickers at cold start
 for _t in app_config.TICKERS:
     try:
         _refresh_cache_for(_t)
@@ -66,86 +70,273 @@ for _t in app_config.TICKERS:
         print(f"[vercel cold-start] {_t} prime failed: {e}")
 
 
-# Build the Dash app
-app = Dash(__name__, title="Polaris — Dealer GEX")
+app = Dash(__name__, title="POLARIS · Dealer GEX Terminal")
 server = app.server  # Vercel hooks into this Flask WSGI object
+
+
+# ────────────────────────────────────────────────────────────────────
+#  Reusable Bloomberg-style cell builders
+# ────────────────────────────────────────────────────────────────────
+
+def _hdr_cell(label, value, value_color=ORANGE):
+    return html.Div(
+        style={
+            "display": "flex",
+            "flexDirection": "column",
+            "padding": "0 16px",
+            "borderRight": f"1px solid {BORDER_BRIGHT}",
+            "minWidth": 90,
+            "justifyContent": "center",
+        },
+        children=[
+            html.Div(label, style={
+                "fontSize": 9,
+                "color": TEXT_DIM,
+                "letterSpacing": 1.2,
+                "fontFamily": MONO,
+                "textTransform": "uppercase",
+            }),
+            html.Div(value, style={
+                "fontSize": 13,
+                "color": value_color,
+                "fontFamily": MONO,
+                "fontWeight": 600,
+                "marginTop": 2,
+            }),
+        ],
+    )
+
+
+# ────────────────────────────────────────────────────────────────────
+#  Layout
+# ────────────────────────────────────────────────────────────────────
 
 app.layout = html.Div(
     style={
-        "backgroundColor": "#0b0f17",
-        "color": "#e8eef8",
+        "backgroundColor": BG_BLACK,
+        "color": TEXT,
         "minHeight": "100vh",
-        "fontFamily": "-apple-system, system-ui, sans-serif",
-        "padding": "16px 24px",
+        "fontFamily": MONO,
+        "padding": 0,
+        "margin": 0,
     },
     children=[
-        html.Div(
-            style={"display": "flex", "alignItems": "center", "justifyContent": "space-between"},
-            children=[
-                html.Div(
-                    children=[
-                        html.H2("★  Polaris", style={"margin": 0, "color": "#f9d649", "display": "inline-block"}),
-                        html.Span(
-                            " — synthetic data demo",
-                            style={"color": "#9cc4ff", "fontSize": 13, "marginLeft": 12},
-                        ),
-                    ],
-                ),
-                html.Div(id="last-update", style={"color": "#9cc4ff", "fontSize": 13}),
-            ],
-        ),
+        # ═══ TOP BAR ═══
         html.Div(
             style={
-                "marginTop": 8,
-                "color": "#5d6f8a",
-                "fontSize": 11,
-                "fontStyle": "italic",
+                "display": "flex",
+                "alignItems": "stretch",
+                "borderBottom": f"2px solid {ORANGE}",
+                "backgroundColor": BG_BLACK,
+                "height": 56,
             },
             children=[
-                "Public deploy uses on-request synthetic data (no LSEG access). "
-                "Run locally with --lseg for real options chains."
+                html.Div(
+                    style={
+                        "display": "flex",
+                        "alignItems": "center",
+                        "padding": "0 18px",
+                        "borderRight": f"1px solid {BORDER_BRIGHT}",
+                    },
+                    children=[
+                        html.Span("★", style={
+                            "fontSize": 18,
+                            "color": ORANGE,
+                            "marginRight": 10,
+                        }),
+                        html.Span("POLARIS", style={
+                            "fontSize": 16,
+                            "color": ORANGE,
+                            "fontWeight": 700,
+                            "letterSpacing": 2,
+                        }),
+                        html.Span(" · DEALER GEX TERMINAL", style={
+                            "fontSize": 9,
+                            "color": TEXT_DIM,
+                            "marginLeft": 8,
+                            "letterSpacing": 1,
+                        }),
+                    ],
+                ),
+                html.Div(
+                    id="header-cells",
+                    style={"display": "flex", "flexGrow": 1, "alignItems": "stretch"},
+                ),
+                # DEMO badge
+                html.Div(
+                    style={
+                        "display": "flex",
+                        "alignItems": "center",
+                        "padding": "0 18px",
+                        "borderLeft": f"1px solid {BORDER_BRIGHT}",
+                        "fontSize": 11,
+                        "letterSpacing": 0.5,
+                    },
+                    children=[
+                        html.Span("◐", style={"color": CYAN, "marginRight": 8, "fontSize": 12}),
+                        html.Span("DEMO", style={
+                            "color": CYAN, "fontWeight": 700, "marginRight": 8,
+                        }),
+                        html.Span("synthetic data, recomputed per request",
+                                  style={"color": TEXT_DIM}),
+                    ],
+                ),
             ],
         ),
+
+        # ═══ FUNCTION BAR ═══
         html.Div(
-            style={"marginTop": 16, "display": "flex", "gap": 12, "alignItems": "center", "flexWrap": "wrap"},
+            style={
+                "display": "flex",
+                "alignItems": "center",
+                "padding": "8px 18px",
+                "borderBottom": f"1px solid {BORDER_BRIGHT}",
+                "backgroundColor": BG_PANEL,
+                "gap": 16,
+            },
             children=[
+                html.Span("TICKER", style={
+                    "fontSize": 9,
+                    "color": TEXT_DIM,
+                    "letterSpacing": 1.2,
+                    "marginRight": 4,
+                }),
                 dcc.Dropdown(
                     id="ticker-select",
                     options=[{"label": t, "value": t} for t in app_config.TICKERS]
                             + [{"label": "TRINITY", "value": "TRINITY"}],
                     value="SPY",
                     clearable=False,
-                    style={"width": 180, "color": "#111"},
+                    style={
+                        "width": 140,
+                        "color": "#111",
+                        "fontFamily": MONO,
+                        "fontSize": 12,
+                    },
                 ),
+                html.Span("MODE", style={
+                    "fontSize": 9,
+                    "color": TEXT_DIM,
+                    "letterSpacing": 1.2,
+                    "marginLeft": 12,
+                    "marginRight": 4,
+                }),
                 dcc.RadioItems(
                     id="mode-select",
                     options=[
                         {"label": " GEX ", "value": "gex"},
                         {"label": " GEX·√T ", "value": "gex_norm"},
                         {"label": " VEX ", "value": "vex"},
-                        {"label": " Color ", "value": "color"},
+                        {"label": " Δ\u0393/Δt ", "value": "color"},
                     ],
                     value="gex",
-                    labelStyle={"display": "inline-block", "marginRight": 14},
-                    inputStyle={"marginRight": 5},
+                    labelStyle={
+                        "display": "inline-block",
+                        "marginRight": 14,
+                        "color": ORANGE,
+                        "fontSize": 11,
+                        "fontFamily": MONO,
+                        "letterSpacing": 1,
+                        "cursor": "pointer",
+                    },
+                    inputStyle={"marginRight": 4, "accentColor": ORANGE},
+                ),
+                # Live local link, far right
+                html.Div(
+                    style={"marginLeft": "auto"},
+                    children=[
+                        html.A(
+                            "GITHUB.COM/AYUSHPANDA-25/POLARIS ↗",
+                            href="https://github.com/ayushpanda-25/polaris",
+                            target="_blank",
+                            style={
+                                "color": TEXT_DIM,
+                                "fontSize": 10,
+                                "letterSpacing": 1,
+                                "textDecoration": "none",
+                                "fontFamily": MONO,
+                            },
+                        ),
+                    ],
                 ),
             ],
         ),
-        dcc.Graph(id="heatmap-graph", style={"marginTop": 16}),
+
+        # ═══ MAIN HEATMAP ═══
+        html.Div(
+            style={"padding": "8px 18px 0 18px"},
+            children=[dcc.Graph(id="heatmap-graph", config={"displaylogo": False})],
+        ),
+
+        # ═══ STATUS BAR ═══
         html.Div(
             id="node-summary",
-            style={"marginTop": 8, "color": "#9cc4ff", "fontSize": 13},
+            style={
+                "padding": "8px 18px",
+                "borderTop": f"1px solid {BORDER_BRIGHT}",
+                "backgroundColor": BG_PANEL,
+                "fontFamily": MONO,
+                "fontSize": 11,
+                "color": TEXT,
+                "letterSpacing": 0.5,
+            },
         ),
-        # Slower poll on the public deploy (10s) to keep lambda invocations down
+
         dcc.Interval(id="poll", interval=10_000, n_intervals=0),
     ],
 )
 
 
+def _build_header_cells(grid, nodes):
+    if grid is None:
+        return [_hdr_cell("SPOT", "—"), _hdr_cell("KING", "—")]
+    spot_str = f"${grid.spot:,.2f}"
+    king_str = f"{nodes.king.strike:g}" if nodes and nodes.king else "—"
+    king_val = f"${nodes.king.value:+,.0f}K" if nodes and nodes.king else ""
+    ts_str = datetime.fromtimestamp(grid.timestamp).strftime("%H:%M:%S")
+    return [
+        _hdr_cell("SPOT", spot_str, value_color=CYAN),
+        _hdr_cell("KING STRIKE", king_str, value_color=AMBER),
+        _hdr_cell("KING VALUE", king_val,
+                  value_color=GREEN if nodes and nodes.king and nodes.king.value > 0 else RED),
+        _hdr_cell("UPDATED", ts_str, value_color=TEXT),
+        _hdr_cell("TICKER", grid.ticker, value_color=ORANGE),
+    ]
+
+
+def _format_status_bar(grid, nodes, mode, ticker):
+    parts = []
+    parts.append(html.Span(
+        f"{ticker:>6}",
+        style={"color": ORANGE, "marginRight": 12, "fontWeight": 700},
+    ))
+    parts.append(html.Span(f"MODE {MODE_LABELS.get(mode, mode).upper():<10}",
+                           style={"color": TEXT_DIM, "marginRight": 12}))
+    if nodes and nodes.king:
+        parts.append(html.Span(
+            f"KING {nodes.king.strike:>6g} @ {nodes.king.expiry}",
+            style={"color": AMBER, "marginRight": 12},
+        ))
+        v_color = GREEN if nodes.king.value > 0 else RED
+        parts.append(html.Span(
+            f"{nodes.king.value:+,.0f}K",
+            style={"color": v_color, "marginRight": 16, "fontWeight": 700},
+        ))
+    if nodes and nodes.gatekeepers:
+        parts.append(html.Span("GATEKEEPERS ", style={"color": TEXT_DIM, "marginRight": 4}))
+        for g in nodes.gatekeepers[:3]:
+            col = GREEN if g.value > 0 else RED
+            parts.append(html.Span(f"{g.strike:g} ", style={"color": ORANGE}))
+            parts.append(html.Span(f"{g.value:+,.0f}K  ", style={"color": col}))
+    if not (nodes and (nodes.king or nodes.gatekeepers)):
+        parts.append(html.Span("(awaiting data)", style={"color": TEXT_DIM}))
+    return parts
+
+
 @app.callback(
     [
         Output("heatmap-graph", "figure"),
-        Output("last-update", "children"),
+        Output("header-cells", "children"),
         Output("node-summary", "children"),
     ],
     [
@@ -155,7 +346,6 @@ app.layout = html.Div(
     ],
 )
 def _update(_n, ticker, mode):
-    # On-demand recompute — no background thread on serverless.
     if ticker == "TRINITY":
         for t in ("SPY", "SPX", "QQQ"):
             try:
@@ -163,8 +353,13 @@ def _update(_n, ticker, mode):
             except Exception as e:
                 print(f"[vercel] refresh {t} failed: {e}")
         fig = _build_trinity_figure(_cache, mode)
-        ts = time.strftime("%H:%M:%S")
-        return fig, f"Last update: {ts}", ""
+        # Use first available ticker for header
+        for t in ("SPY", "SPX", "QQQ"):
+            grid = _cache.get_grid(t)
+            nodes = _cache.get_nodes(t)
+            if grid is not None:
+                break
+        return fig, _build_header_cells(grid, nodes), _format_status_bar(grid, nodes, mode, "TRINITY")
 
     try:
         grid, nodes = _refresh_cache_for(ticker)
@@ -174,29 +369,8 @@ def _update(_n, ticker, mode):
         nodes = _cache.get_nodes(ticker)
 
     fig = _build_heatmap_figure(grid, nodes, mode)
-
-    if grid:
-        ts = datetime.fromtimestamp(grid.timestamp).strftime("%H:%M:%S")
-        last = f"Last update: {ts}  ·  spot ${grid.spot:.2f}"
-    else:
-        last = "Last update: —"
-
-    summary_parts = []
-    if nodes and nodes.king:
-        summary_parts.append(
-            f"♛ King: {nodes.king.strike} @ {nodes.king.expiry}  ·  ${nodes.king.value:,.0f}k"
-        )
-    if nodes and nodes.gatekeepers:
-        gk = ", ".join(
-            f"{g.strike}({g.value:+.0f}k)" for g in nodes.gatekeepers[:3]
-        )
-        summary_parts.append(f"Gatekeepers: {gk}")
-    summary = "  ·  ".join(summary_parts) if summary_parts else "(no nodes yet)"
-
-    return fig, last, summary
+    return fig, _build_header_cells(grid, nodes), _format_status_bar(grid, nodes, mode, ticker)
 
 
-# Vercel entry — exports `app` (Flask WSGI). Vercel's @vercel/python builder
-# detects this and routes requests to it.
 if __name__ == "__main__":
     app.run(debug=False, port=8050)
