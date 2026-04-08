@@ -14,6 +14,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import base64
 import sys
 import time
 from datetime import datetime
@@ -23,6 +24,23 @@ import dash
 import numpy as np
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, dcc, html
+
+
+# ─── Embed the North Star SVG as a base64 data URI so Plotly can render it
+# inside heatmap cells via add_layout_image without depending on a server
+# being able to serve /assets/northstar.svg at the moment of figure render.
+def _load_north_star_data_uri() -> str:
+    try:
+        svg_path = Path(__file__).resolve().parents[1] / "assets" / "northstar.svg"
+        if svg_path.exists():
+            data = svg_path.read_bytes()
+            b64 = base64.b64encode(data).decode("ascii")
+            return f"data:image/svg+xml;base64,{b64}"
+    except Exception:
+        pass
+    return ""
+
+NORTH_STAR_DATA_URI = _load_north_star_data_uri()
 
 # Allow running as "python -m src.dashboard" from project root
 if __package__ in (None, ""):
@@ -110,16 +128,16 @@ def _add_bracket_corners(
     half: float = 0.46,
     length: float = 0.20,
     width: float = 2.5,
-    tag: str = "C",
+    show_star: bool = True,
+    star_size: float = 0.30,
 ) -> None:
     """
     Draw 4 L-shaped corner brackets around a categorical-axis cell at
-    (x_idx, y_idx), plus a small filled "C" tag in the top-left corner.
-    With type='category' axes, the cell at column index N spans from N-0.5
-    to N+0.5 in plot coordinates, so we draw brackets just inside that
-    bounding box.
+    (x_idx, y_idx), plus a mini north star icon in the top-left corner
+    of the cell (echoing the brand mark).
 
-    Viewfinder / scope reticle style + Bloomberg-style corner label.
+    With type='category' axes, the cell at column index N spans from N-0.5
+    to N+0.5 in plot coordinates.
     """
     # 4 corners × (horizontal segment + vertical segment) = 8 lines
     corners = [
@@ -143,28 +161,28 @@ def _add_bracket_corners(
             line=line_style, layer="above",
         )
 
-    # Crown tag: filled rect with letter inside, top-left of cell.
-    # (y axis is reversed, so y_idx - half is the visual top.)
-    if tag:
-        tag_w = 0.16
-        tag_h = 0.32
-        tag_x0 = x_idx - half
-        tag_y0 = y_idx - half
-        fig.add_shape(
-            type="rect", xref="x", yref="y",
-            x0=tag_x0, y0=tag_y0,
-            x1=tag_x0 + tag_w, y1=tag_y0 + tag_h,
-            fillcolor=color,
-            line=dict(width=0),
-            layer="above",
-        )
+    # Mini north star inside the top-left of the cell (option C from the
+    # icon preview — echoes the brand mark in the header).
+    #
+    # We use add_annotation with fractional category coordinates (which
+    # works on category axes — Scatter does NOT) and a system unicode
+    # font fallback list so the glyph actually renders. JetBrains Mono
+    # doesn't ship a glyph for ✦ — it falls back to a narrow serif.
+    # Apple Symbols / Segoe UI Symbol / Arial Unicode all have it.
+    if show_star:
         fig.add_annotation(
             xref="x", yref="y",
-            x=tag_x0 + tag_w / 2,
-            y=tag_y0 + tag_h / 2,
-            text=f"<b>{tag}</b>",
+            x=x_idx - half + 0.05,
+            y=y_idx - half + 0.03,
+            text="✦",
             showarrow=False,
-            font=dict(family=MONO, size=10, color="#000000"),
+            xanchor="left",
+            yanchor="top",
+            font=dict(
+                family="'Apple Symbols', 'Segoe UI Symbol', 'Arial Unicode MS', sans-serif",
+                size=28,
+                color=color,
+            ),
         )
 
 
@@ -414,9 +432,8 @@ def _build_trinity_figure(cache, mode: str = "gex") -> go.Figure:
             kx = _trinity_format_exp(nodes.king.expiry)
             ky = f"{nodes.king.strike:g}"
             if kx in exp_labels and ky in strike_labels:
-                # Trinity mode: subplot-aware bracket corners.
-                # add_shape with row/col + xref/yref='x'/'y' references
-                # the subplot's local axes.
+                # Trinity mode: subplot-aware bracket corners + mini star.
+                # add_shape with row/col references the subplot's local axes.
                 x_idx = exp_labels.index(kx)
                 y_idx = strike_labels.index(ky)
                 half, length, width = 0.46, 0.22, 2
@@ -440,6 +457,21 @@ def _build_trinity_figure(cache, mode: str = "gex") -> go.Figure:
                         line=line_style, layer="above",
                         row=1, col=idx,
                     )
+                # Mini ✦ in top-left of cell (smaller in trinity mode)
+                fig.add_annotation(
+                    x=x_idx - half + 0.05,
+                    y=y_idx - half + 0.03,
+                    text="✦",
+                    showarrow=False,
+                    xanchor="left",
+                    yanchor="top",
+                    font=dict(
+                        family="'Apple Symbols', 'Segoe UI Symbol', 'Arial Unicode MS', sans-serif",
+                        size=18,
+                        color=AMBER,
+                    ),
+                    row=1, col=idx,
+                )
 
     fig.update_layout(
         template="plotly_dark",
