@@ -389,6 +389,17 @@ def _build_trinity_figure(cache, mode: str = "gex") -> go.Figure:
         if vmax == 0:
             vmax = 1.0
 
+        # Cell labels (same convention as single-ticker view)
+        def _fmt(v: float) -> str:
+            if abs(v) < 0.5:
+                return ""
+            if abs(v) >= 1000:
+                return f"${v / 1000:,.1f}M"
+            return f"${v:,.0f}K"
+
+        text_grid = [[_fmt(mat[i, j]) for j in range(mat.shape[1])]
+                     for i in range(mat.shape[0])]
+
         fig.add_trace(
             go.Heatmap(
                 z=mat,
@@ -398,6 +409,9 @@ def _build_trinity_figure(cache, mode: str = "gex") -> go.Figure:
                 colorscale=SKYLIT_COLORSCALE,
                 showscale=(idx == 3),
                 xgap=2, ygap=2,
+                text=text_grid,
+                texttemplate="%{text}",
+                textfont=dict(size=8, color=TEXT, family=MONO),
                 hovertemplate=f"{tkr}<br>Strike %{{y}}<br>Expiry %{{x}}<br>{MODE_LABELS.get(mode, mode.upper())} $%{{z:.0f}}k<extra></extra>",
             ),
             row=1, col=idx,
