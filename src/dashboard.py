@@ -419,18 +419,25 @@ def _build_trinity_figure(cache, mode: str = "gex") -> go.Figure:
         showlegend=False,
         paper_bgcolor=BG_BLACK,
         plot_bgcolor=BG_BLACK,
-        height=660,
+        height=680,
         title=dict(
             text=f"TRINITY  ·  {MODE_LABELS.get(mode, mode.upper()).upper()}",
             font=dict(family=MONO, size=11, color=ORANGE),
             x=0.01,
+            y=0.985,
             xanchor="left",
+            yanchor="top",
         ),
-        margin=dict(l=50, r=70, t=50, b=20),
+        # Extra top margin so subplot titles + x-axis labels don't collide
+        margin=dict(l=50, r=70, t=96, b=20),
     )
-    # Tone subplot titles to Bloomberg style
+    # Tone subplot titles AND push them above the x-axis tick labels.
+    # subplot_titles default to y≈1.0 which collides with side='top' x-ticks;
+    # bumping y to >1.0 puts them in the top margin.
     for i, ann in enumerate(fig.layout.annotations):
-        ann.font = dict(family=MONO, size=11, color=ORANGE)
+        ann.font = dict(family=MONO, size=13, color=ORANGE, weight=700)
+        ann.y = 1.08   # above the plot area, in the top margin
+        ann.yanchor = "bottom"
     for i in range(1, 4):
         fig.update_xaxes(
             type="category", side="top",

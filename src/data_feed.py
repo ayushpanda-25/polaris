@@ -62,6 +62,59 @@ def bs_vanna(S: float, K: float, T: float, r: float, sigma: float) -> float:
     return -_norm_pdf(d1) * d2 / sigma
 
 
+def _norm_cdf(x: float) -> float:
+    # Abramowitz & Stegun approximation, good to ~1e-7
+    import math as _m
+    a1, a2, a3, a4, a5 = 0.254829592, -0.284496736, 1.421413741, -1.453152027, 1.061405429
+    p = 0.3275911
+    sign = 1 if x >= 0 else -1
+    x = abs(x) / _m.sqrt(2)
+    t = 1.0 / (1.0 + p * x)
+    y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * _m.exp(-x * x)
+    return 0.5 * (1.0 + sign * y)
+
+
+def implied_vol_from_delta(
+    S: float, K: float, T: float, r: float,
+    delta: float, option_type: str,
+) -> float:
+    """
+    Back out implied volatility from Black-Scholes delta using Newton's
+    method. Fast, robust, and doesn't need the option price at all.
+
+    This is the escape hatch when LSEG returns DELTA but not IMPL_VOL
+    (which is what happens on the desktop-feed tier for SPY options).
+    """
+    import math as _m
+    if T <= 0 or S <= 0 or K <= 0 or abs(delta) < 1e-6 or abs(delta) > 0.9999:
+        return 0.0
+    # For puts, work with positive-equivalent delta
+    d = abs(delta) if option_type.upper() == "C" else 1.0 - abs(delta)
+    if d <= 1e-6 or d >= 0.9999:
+        return 0.0
+    # Initial guess from Brenner-Subrahmanyam style
+    sigma = 0.20
+    for _ in range(50):
+        sqrt_T = _m.sqrt(T)
+        if sigma <= 0 or sqrt_T == 0:
+            return 0.0
+        d1 = (_m.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * sqrt_T)
+        nd1 = _norm_cdf(d1)
+        # dDelta/dSigma = vega / S  (approximately)
+        vega_term = _norm_pdf(d1) * sqrt_T
+        if abs(vega_term) < 1e-10:
+            break
+        diff = nd1 - d
+        if abs(diff) < 1e-5:
+            return sigma
+        sigma -= diff / vega_term
+        if sigma < 0.01:
+            sigma = 0.01
+        if sigma > 5.0:
+            sigma = 5.0
+    return max(sigma, 0.0)
+
+
 def bs_color(S: float, K: float, T: float, r: float, sigma: float) -> float:
     """
     Color = ∂Γ/∂t. Positive values mean gamma is growing as time passes
@@ -376,11 +429,35 @@ class LSEGOptionsFeed:
 
             oi = self._clean_float(row.get("OPEN_INT"))
             iv = self._clean_float(row.get("IMPL_VOL"))
+            delta = self._clean_float(row.get("DELTA"))
+            volume = self._clean_float(row.get("CF_VOLUME"))
 
+            # ── OI fallback: LSEG desktop tier often returns NA for OI on
+            #    US single-name options. Fall back to same-day volume as
+            #    a proxy — it's not perfect (volume != OI) but it's a
+            #    real magnitude signal that lets us produce a usable GEX
+            #    surface intraday. EOD OI reconciliation (scripts/
+            #    backfill_eod.py) will tighten this later.
             if oi is None or oi <= 0:
-                continue
+                if volume is not None and volume > 0:
+                    oi = volume
+                else:
+                    continue  # truly no data, skip
+
+            # ── IV fallback: invert from delta if LSEG didn't provide IV.
+            #    The desktop tier has DELTA populated for most liquid strikes
+            #    even when IMPL_VOL is NA.
             if iv is None or iv <= 0:
-                continue
+                days_to_expiry_tmp = max((exp - today).days, 0)
+                T_tmp = max(days_to_expiry_tmp, 0) / 365.0
+                if T_tmp == 0:
+                    T_tmp = 0.5 / 365.0
+                if delta is not None and abs(delta) > 0.01:
+                    iv = implied_vol_from_delta(
+                        spot, strike, T_tmp, RISK_FREE_RATE, delta, otype
+                    )
+                if iv is None or iv <= 0:
+                    continue
 
             # Normalize IV: LSEG returns percent (15.0 = 15%) most of the time
             if iv > 3:
@@ -414,8 +491,8 @@ class LSEGOptionsFeed:
 
         if not contracts:
             raise RuntimeError(
-                f"All chain rows empty for {ticker} — likely delayed feed or "
-                f"pre-market. Check LSEG entitlements."
+                f"All chain rows empty for {ticker} — neither OI nor volume "
+                f"populated. Check LSEG entitlements or try again later."
             )
 
         return ChainSnapshot(

@@ -40,3 +40,4 @@ nohup.out
 # Don't commit launch.json which has user-specific paths
 .claude/launch.json
 .vercel
+lseg-data.config.json
