@@ -242,7 +242,13 @@ STRIKE_STEPS = {
 
 OPTION_FIELDS = [
     "CF_BID", "CF_ASK", "CF_LAST", "CF_VOLUME",
-    "OPEN_INT", "IMPL_VOL", "DELTA",
+    # Open interest: OPEN_INT returns <NA> on desktop tier for US listed
+    # options, but OPINT_1 returns real values via the same REST call.
+    # Confirmed for SPY and SPX option RICs on 2026-04-08. OPEN_INT is
+    # kept in the list as a secondary probe in case OPINT_1 ever goes
+    # dark or the tier changes.
+    "OPINT_1", "OPEN_INT",
+    "IMPL_VOL", "DELTA",
 ]
 
 
@@ -744,23 +750,26 @@ class LSEGOptionsFeed:
             delta = self._clean_float(row.get("DELTA"))
             volume = self._clean_float(row.get("CF_VOLUME"))
 
-            # ── OI resolution order:
-            #   1. yfinance EOD OI (real previous-close OI, free).
-            #   2. LSEG TR.OpenInterest (dormant on desktop tier).
-            #   3. Live snapshot OPEN_INT (occasionally populated).
-            #   4. Today's volume (last resort, inflates magnitudes).
-            exp_iso = exp.isoformat() if hasattr(exp, "isoformat") else str(exp)
-            oi = yf_oi_by_key.get((float(strike), exp_iso, otype))
-            if oi is None or oi <= 0:
-                oi = eod_oi_by_ric.get(ric)
+            # ── OI resolution order (best → worst):
+            #   1. LSEG snapshot OPINT_1 — real OI, populated for both
+            #      SPY AND SPX on desktop tier (confirmed 2026-04-08).
+            #      This is the primary source.
+            #   2. LSEG snapshot OPEN_INT — the "old" field we used to
+            #      try. Almost always <NA> but checked as a secondary.
+            #   3. yfinance EOD OI — previous-close OI per contract.
+            #      Kept as a fallback in case LSEG has a gap.
+            #   4. LSEG TR.OpenInterest — dormant probe path.
+            #   5. Today's volume (with 0DTE calibration) — last resort.
+            oi = self._clean_float(row.get("OPINT_1"))
             if oi is None or oi <= 0:
                 oi = self._clean_float(row.get("OPEN_INT"))
             if oi is None or oi <= 0:
+                exp_iso = exp.isoformat() if hasattr(exp, "isoformat") else str(exp)
+                oi = yf_oi_by_key.get((float(strike), exp_iso, otype))
+            if oi is None or oi <= 0:
+                oi = eod_oi_by_ric.get(ric)
+            if oi is None or oi <= 0:
                 if volume is not None and volume > 0:
-                    # Apply 0DTE scale correction for today's expiries
-                    # where yfinance has no data. Other expiries pass
-                    # through unchanged (correction factor will be 1.0
-                    # if calibration failed).
                     is_zero_dte = hasattr(exp, "__sub__") and (exp - today).days <= 0
                     oi = volume * (zero_dte_scale if is_zero_dte else 1.0)
                 else:
