@@ -11,6 +11,7 @@ All return ChainSnapshot ready for the GEX engine.
 from __future__ import annotations
 
 import math
+import os
 import pickle
 import random
 import time
@@ -283,11 +284,17 @@ class LSEGOptionsFeed:
         self._started = False
         self._rd = None
         self.timeout_sec = timeout_sec
-        # EOD OI cache: ticker -> (fetch_date, {ric: oi}). Refetched once per
-        # day via rd.get_history. Proper source — snapshot OPEN_INT returns
-        # NA on desktop tier and the volume fallback over-inflates on active
-        # days.
+        # LSEG TR.OpenInterest cache: ticker -> (fetch_date, {ric: oi}).
+        # Dormant on desktop tier (TR.OpenInterest not entitled for US
+        # option RICs) but still runs once per day in case entitlements
+        # change — failures are fail-fast at 30s so startup stays snappy.
         self._eod_oi_cache: dict[str, tuple[date, dict[str, float]]] = {}
+        # yfinance EOD OI cache: ticker -> (fetch_date, {(strike,expiry,otype): oi}).
+        # Primary OI source. Data is yesterday's close, updated once per
+        # trading day. Values are true OI, not volume.
+        self._yf_oi_cache: dict[
+            str, tuple[date, dict[tuple[float, str, str], float]]
+        ] = {}
 
     def _ensure_session(self):
         if self._started:
@@ -302,6 +309,156 @@ class LSEGOptionsFeed:
                 f"Could not open LSEG desktop session. "
                 f"Is LSEG Workspace running and signed in? Error: {e}"
             ) from e
+
+    # ────────────────────────────────────────────────────────────────
+    # yfinance EOD OI — primary OI source
+    # ────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _yf_symbol(ticker: str) -> str:
+        """Map polaris ticker → yfinance symbol."""
+        t = ticker.upper()
+        if t == "SPX":
+            return "^SPX"
+        return t
+
+    def _fetch_yf_oi(
+        self, ticker: str
+    ) -> dict[tuple[float, str, str], float]:
+        """
+        Pull EOD OI from yfinance for every available expiry of `ticker`,
+        return {(strike, expiry_iso, 'C'|'P'): open_interest}.
+
+        yfinance serves the previous session's close, so values are stable
+        through the day and update once per trading day. On a network
+        failure or rate-limit this returns an empty dict — caller falls
+        through to the LSEG OI chain.
+        """
+        try:
+            import yfinance as yf
+        except ImportError:
+            print("[lseg_feed] yfinance not installed — skipping EOD OI", flush=True)
+            return {}
+
+        sym = self._yf_symbol(ticker)
+        out: dict[tuple[float, str, str], float] = {}
+        try:
+            yticker = yf.Ticker(sym)
+            expiries = yticker.options or ()
+        except Exception as e:
+            print(
+                f"[lseg_feed] yfinance {sym} options list failed: "
+                f"{type(e).__name__}: {e}",
+                flush=True,
+            )
+            return {}
+
+        # Only pull the first 8 expiries — matches our chain window and
+        # keeps the number of HTTP requests bounded.
+        n_ok = 0
+        for exp in expiries[:8]:
+            try:
+                chain = yticker.option_chain(exp)
+            except Exception as e:
+                print(
+                    f"[lseg_feed] yfinance {sym} {exp} chain failed: "
+                    f"{type(e).__name__}: {e}",
+                    flush=True,
+                )
+                continue
+            for df, otype in ((chain.calls, "C"), (chain.puts, "P")):
+                if df is None or df.empty:
+                    continue
+                if "strike" not in df.columns or "openInterest" not in df.columns:
+                    continue
+                for _, row in df.iterrows():
+                    try:
+                        strike = float(row["strike"])
+                        oi_raw = row["openInterest"]
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    oi = self._clean_float(oi_raw)
+                    if oi is not None and oi > 0:
+                        out[(strike, exp, otype)] = oi
+            n_ok += 1
+        print(
+            f"[lseg_feed] yfinance {sym}: {len(out)} contracts with OI "
+            f"across {n_ok} expiries",
+            flush=True,
+        )
+        return out
+
+    @staticmethod
+    def _calibrate_zero_dte_scale(
+        rics_meta: list[tuple[str, float, str, "date"]],
+        row_by_ric: dict[str, dict],
+        yf_oi_by_key: dict[tuple[float, str, str], float],
+        today: "date",
+    ) -> float:
+        """
+        Compute median(OI/volume) across contracts where we have both
+        yfinance OI and live-feed volume. Used to scale 0DTE volume
+        fallback into an OI-like magnitude.
+
+        Returns 1.0 (pass-through) if there aren't enough matched pairs
+        — don't invent a correction from noise.
+        """
+        ratios = []
+        for ric, strike, otype, exp in rics_meta:
+            if not hasattr(exp, "isoformat"):
+                continue
+            if (exp - today).days <= 0:
+                continue  # skip 0DTE itself — that's what we're calibrating FOR
+            key = (float(strike), exp.isoformat(), otype)
+            oi = yf_oi_by_key.get(key)
+            if oi is None or oi <= 0:
+                continue
+            row = row_by_ric.get(ric)
+            if row is None:
+                continue
+            vol_raw = row.get("CF_VOLUME")
+            try:
+                import pandas as pd
+                if vol_raw is None or pd.isna(vol_raw):
+                    continue
+                vol = float(vol_raw)
+            except (TypeError, ValueError):
+                continue
+            if vol <= 0:
+                continue
+            ratios.append(oi / vol)
+        if len(ratios) < 20:
+            # Too few matches — don't fabricate a correction.
+            print(
+                f"[lseg_feed] 0DTE scale calibration: only "
+                f"{len(ratios)} matched pairs, using pass-through",
+                flush=True,
+            )
+            return 1.0
+        import statistics
+        scale = statistics.median(ratios)
+        print(
+            f"[lseg_feed] 0DTE scale: median OI/volume ratio = "
+            f"{scale:.4f} (from {len(ratios)} matched pairs)",
+            flush=True,
+        )
+        # Sanity clamp: scale should be in (0, 1] since OI < volume is
+        # the normal case. If our calibration is outside that range,
+        # something is off — pass through raw volume instead.
+        if not (0 < scale <= 1):
+            return 1.0
+        return scale
+
+    def _get_yf_oi_cached(
+        self, ticker: str
+    ) -> dict[tuple[float, str, str], float]:
+        """Fetch-once-per-day wrapper around _fetch_yf_oi."""
+        today = date.today()
+        cached = self._yf_oi_cache.get(ticker)
+        if cached and cached[0] == today:
+            return cached[1]
+        oi_map = self._fetch_yf_oi(ticker)
+        self._yf_oi_cache[ticker] = (today, oi_map)
+        return oi_map
 
     def _fetch_eod_oi(self, rics: list[str]) -> dict[str, float]:
         """
@@ -531,12 +688,19 @@ class LSEGOptionsFeed:
         import pandas as pd
         df = pd.concat(frames, ignore_index=True)
 
-        # Fetch EOD OI once per day per ticker. Proper source — snapshot
-        # OPEN_INT returns NA on desktop tier, and the intraday volume
-        # fallback inflates magnitudes ~30x on active days. EOD history
-        # doesn't have that problem. Any failure here falls through
-        # silently to the existing OI chain below.
-        eod_oi_by_ric = self._get_eod_oi_cached(ticker, all_rics)
+        # ── EOD OI resolution ─────────────────────────────────────────
+        # Primary: yfinance (real EOD OI, free, network-only). The LSEG
+        # TR.OpenInterest probe is opt-in via POLARIS_PROBE_LSEG_OI=1
+        # because it hangs ~5 minutes per startup on the desktop tier
+        # (TR.* fields aren't entitled for US option RICs). It stays
+        # wired up so it activates automatically if entitlements ever
+        # change. Snapshot OPEN_INT and volume fallbacks live in the
+        # per-row loop.
+        yf_oi_by_key = self._get_yf_oi_cached(ticker)
+        if os.environ.get("POLARIS_PROBE_LSEG_OI") == "1":
+            eod_oi_by_ric = self._get_eod_oi_cached(ticker, all_rics)
+        else:
+            eod_oi_by_ric: dict[str, float] = {}
 
         # CRITICAL: rows MUST be matched by an Instrument column.
         # Falling back to positional matching is unsafe — LSEG can reorder
@@ -561,6 +725,16 @@ class LSEGOptionsFeed:
         contracts: list[OptionContract] = []
         today = date.today()
 
+        # Calibrate a 0DTE volume→OI scale correction. yfinance drops
+        # same-day-expiring contracts, so today's 0DTE column otherwise
+        # falls through to raw volume and inflates 30-60x. Use the
+        # observed OI/volume ratio from the EARLIEST non-0DTE expiry
+        # where both are populated, median across all its contracts.
+        # Falls back to 1.0 (pass-through) if no calibration data.
+        zero_dte_scale = self._calibrate_zero_dte_scale(
+            rics_meta, row_by_ric, yf_oi_by_key, today
+        )
+
         for ric, strike, otype, exp in rics_meta:
             row = row_by_ric.get(ric)
             if row is None:
@@ -571,20 +745,24 @@ class LSEGOptionsFeed:
             volume = self._clean_float(row.get("CF_VOLUME"))
 
             # ── OI resolution order:
-            #   1. Yesterday's EOD OI from rd.get_history (fetched once/day)
-            #      — proper source, stable magnitudes, preferred.
-            #   2. Live snapshot OPEN_INT — often NA on desktop tier, but
-            #      populated for some deep-OTM strikes even when history
-            #      has gaps.
-            #   3. Today's volume fallback — last resort, inflates
-            #      magnitudes on active days but keeps the heatmap from
-            #      being completely empty.
-            oi = eod_oi_by_ric.get(ric)
+            #   1. yfinance EOD OI (real previous-close OI, free).
+            #   2. LSEG TR.OpenInterest (dormant on desktop tier).
+            #   3. Live snapshot OPEN_INT (occasionally populated).
+            #   4. Today's volume (last resort, inflates magnitudes).
+            exp_iso = exp.isoformat() if hasattr(exp, "isoformat") else str(exp)
+            oi = yf_oi_by_key.get((float(strike), exp_iso, otype))
+            if oi is None or oi <= 0:
+                oi = eod_oi_by_ric.get(ric)
             if oi is None or oi <= 0:
                 oi = self._clean_float(row.get("OPEN_INT"))
             if oi is None or oi <= 0:
                 if volume is not None and volume > 0:
-                    oi = volume
+                    # Apply 0DTE scale correction for today's expiries
+                    # where yfinance has no data. Other expiries pass
+                    # through unchanged (correction factor will be 1.0
+                    # if calibration failed).
+                    is_zero_dte = hasattr(exp, "__sub__") and (exp - today).days <= 0
+                    oi = volume * (zero_dte_scale if is_zero_dte else 1.0)
                 else:
                     continue  # truly no data, skip
 
