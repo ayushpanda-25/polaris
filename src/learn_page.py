@@ -198,7 +198,7 @@ the patterns become automatic.
   <p>
     1. <span class="key">Where is the magnet?</span> — find the Sirius strike.<br>
     2. <span class="key">Is it pulling or repelling?</span> — check the sign.<br>
-    3. <span class="key">Are all three indices saying the same thing?</span> — flip to Trinity Mode.
+    3. <span class="key">Are all three indices saying the same thing?</span> — flip to Orion Mode.
   </p>
   <p class="dim" style="margin-bottom:0">
     If the answer to #3 is "no", sit out. If it's "yes", you have a regime call.
@@ -319,8 +319,8 @@ the patterns become automatic.
   </li>
   <li>
     <div class="name">MULTI-INDEX AGREEMENT</div>
-    Flip to Trinity Mode. If SPY/SPX/QQQ all show the same regime, conviction is real.
-    If they disagree, the regime call is mixed and you sit out. <span class="key">This is what Trinity is for.</span>
+    Flip to Orion Mode. If SPY/SPX/QQQ all show the same regime, conviction is real.
+    If they disagree, the regime call is mixed and you sit out. <span class="key">This is what Orion is for.</span>
   </li>
   <li>
     <div class="name">RESHUFFLE COOLDOWN</div>
@@ -352,7 +352,7 @@ the patterns become automatic.
     these often signal a regime flip.
   </li>
   <li>
-    <span class="key">Flip to Trinity Mode</span> and check whether SPY, SPX, and
+    <span class="key">Flip to Orion Mode</span> and check whether SPY, SPX, and
     QQQ all agree on the regime. If yes → high conviction. If no → low conviction,
     sit out.
   </li>
@@ -362,7 +362,7 @@ the patterns become automatic.
   </li>
 </ol>
 
-<h1>What Trinity Mode Is</h1>
+<h1>What Orion Mode Is</h1>
 <p>
   Three index heatmaps side by side: SPY, SPX, QQQ. Same time, same mode, three
   different positioning maps. The reason it exists: <span class="key">a setup is
@@ -371,7 +371,7 @@ the patterns become automatic.
   suspect. If all three flip together, you have real conviction.
 </p>
 <p class="dim">
-  Pick TRINITY from the ticker dropdown to enter the view.
+  Pick ORION from the ticker dropdown to enter the view.
 </p>
 
 <h1>What The Significance Flag Means</h1>

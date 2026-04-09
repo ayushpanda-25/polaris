@@ -160,33 +160,44 @@ def _add_bracket_corners(
         )
 
 
+def _color_transform(mat: np.ndarray) -> np.ndarray:
+    """
+    Signed cube-root transform applied to the z-matrix for coloring only.
+
+    Dealer GEX spans 5-6 orders of magnitude within one grid (from ~$100
+    for deep-OTM 1DTE strikes up to ~$2B at ATM pins). On a linear scale,
+    ATM outliers force the color ramp wide enough that anything below 1%
+    of vmax renders as solid black — half the grid looks empty even
+    though every cell has real populated data.
+
+    Taking sign(v) * |v|^(1/3) compresses the 1,000,000:1 raw dynamic
+    range into a 100:1 color range, so a $400K cell shows ~10% of the
+    intensity of a $400B cell instead of 0.001%. The sign is preserved
+    so positive/negative coloring still works.
+
+    Text labels continue to show real dollar values — only the color
+    mapping is transformed.
+    """
+    sign = np.sign(mat)
+    return sign * np.power(np.abs(mat), 1.0 / 3.0)
+
+
 def _compute_color_scale(mat: np.ndarray, mode: str) -> float:
     """
-    Symmetric color-scale half-range for the GEX heatmap.
+    Symmetric color-scale half-range for the transformed GEX matrix.
 
-    The old implementation used the 95th percentile of |mat|, which on panic
-    selloff days gets dominated by a handful of ATM outliers (e.g. 0DTE pin
-    strikes driven to $20B+ by the volume-as-OI fallback). When a few cells
-    span ±$30B and the rest live in ±$500M, symmetric ±vmax painted every
-    non-ATM cell as effectively black — the dashboard looked half-empty.
-
-    Fix: use a lower percentile (median for bulk cells) scaled by a fixed
-    factor. This gives mid-range strikes visible color while still letting
-    ATM outliers "peg" the top of the scale.
+    `mat` here is expected to be the output of `_color_transform` — the
+    cube-root-compressed matrix, not raw dollars. We clamp against the
+    90th percentile of the transformed values so ATM outliers still peg
+    the top of the scale but don't drag the bottom into solid black.
     """
     nz = np.abs(mat[mat != 0])
     if nz.size == 0:
         return 1.0
     if mode == "color":
-        # Color (∂Γ/∂t) mode has tighter native dynamic range; keep the
-        # old behavior so 75th percentile scaling matches existing reads.
-        vmax = float(np.percentile(nz, 75))
+        vmax = float(np.percentile(nz, 80))
     else:
-        # Median × 4 tracks "typical" cells instead of being dragged by
-        # a handful of ATM monsters. On a calm day median ~ mean so this
-        # is equivalent to the old scale; on a panic day it clamps to
-        # something readable for 95% of the grid.
-        vmax = float(np.median(nz) * 4.0)
+        vmax = float(np.percentile(nz, 90))
     return vmax if vmax > 0 else 1.0
 
 
@@ -194,14 +205,18 @@ def _fmt_cell(v: float) -> str:
     """
     Format one heatmap cell label.
 
-    Three tiers:
-        >= $1M     "$12.3M"
-        >= $0.5K   "$620K"
-        < $0.5K    "·"    (dim placeholder so the cell doesn't look broken)
+    Four tiers:
+        >= $1M       "$12.3M"
+        >= $0.5K     "$620K"
+        0 < |v| < $0.5K   "·"   (populated cell, dollar value sub-$500)
+        v == 0       ""        (truly empty cell — stays black)
 
-    The placeholder matters because deep-OTM strikes have real-but-tiny GEX;
-    printing an empty string made users think half the grid wasn't rendering.
+    The combination of (a) the cube-root color transform on the z-matrix
+    and (b) the '·' marker ensures tiny-but-real cells both tint and
+    label themselves visibly, while genuinely-empty cells stay dark.
     """
+    if v == 0:
+        return ""
     if abs(v) < 0.5:
         return "·"
     if abs(v) >= 1000:
@@ -247,18 +262,23 @@ def _build_heatmap_figure(grid: GEXGrid, nodes: NodeMap, mode: str = "gex") -> g
     expiry_labels = [_format_exp(e) for e in expiries]
     strike_labels = [f"{s:g}" for s in strikes]
 
-    # Clamp color scale against ATM outliers and label every cell (including
-    # near-zero ones, which get a dim placeholder instead of empty string).
-    vmax = _compute_color_scale(mat, mode)
+    # Apply the cube-root color transform to the z-matrix so tiny cells
+    # still show visible color. Text labels keep the real dollar values.
+    z_color = _color_transform(mat)
+    vmax = _compute_color_scale(z_color, mode)
 
     text_grid = [[_fmt_cell(mat[i, j]) for j in range(mat.shape[1])]
                  for i in range(mat.shape[0])]
 
+    # Custom hover template with real dollar values from the untransformed
+    # matrix via customdata (z is now the transformed colorspace value).
+    customdata = mat  # raw dollars, for hover display
+
     mode_label = MODE_LABELS.get(mode, mode.upper())
 
-    # Symmetric scale around zero
     heat = go.Heatmap(
-        z=mat,
+        z=z_color,
+        customdata=customdata,
         x=expiry_labels,
         y=strike_labels,
         zmin=-vmax,
@@ -275,12 +295,16 @@ def _build_heatmap_figure(grid: GEXGrid, nodes: NodeMap, mode: str = "gex") -> g
             outlinewidth=0,
             tickfont=dict(family=MONO, size=9, color=TEXT_DIM),
             bgcolor=BG_BLACK,
+            # Hide tick labels on the transformed scale — they're meaningless
+            # (cube-root dollars) and the text labels on cells carry the
+            # actual values.
+            showticklabels=False,
         ),
         hovertemplate=(
             "<span style='font-family:monospace'>"
             "STRIKE  %{y}<br>"
             "EXPIRY  %{x}<br>"
-            f"{mode_label.upper()}    $%{{z:,.1f}}K"
+            f"{mode_label.upper()}    $%{{customdata:,.1f}}K"
             "</span><extra></extra>"
         ),
         text=text_grid,
@@ -377,24 +401,24 @@ def _build_heatmap_figure(grid: GEXGrid, nodes: NodeMap, mode: str = "gex") -> g
     return fig
 
 
-def _build_trinity_figure(cache, mode: str = "gex") -> go.Figure:
+def _build_orion_figure(cache, mode: str = "gex") -> go.Figure:
     from plotly.subplots import make_subplots
 
-    trinity_tickers = ["SPY", "SPX", "QQQ"]
+    orion_tickers = ["SPY", "SPX", "QQQ"]
     fig = make_subplots(
         rows=1,
         cols=3,
-        subplot_titles=trinity_tickers,
+        subplot_titles=orion_tickers,
         horizontal_spacing=0.06,
     )
 
-    def _trinity_format_exp(e: str) -> str:
+    def _orion_format_exp(e: str) -> str:
         try:
             return datetime.fromisoformat(e).strftime("%b %-d")
         except Exception:
             return e
 
-    for idx, tkr in enumerate(trinity_tickers, start=1):
+    for idx, tkr in enumerate(orion_tickers, start=1):
         grid = cache.get_grid(tkr)
         nodes = cache.get_nodes(tkr)
         if grid is None or not grid.cells:
@@ -414,32 +438,37 @@ def _build_trinity_figure(cache, mode: str = "gex") -> go.Figure:
             expiries = expiries[:5]
             mat = mat[:, :5]
 
-        exp_labels = [_trinity_format_exp(e) for e in expiries]
+        exp_labels = [_orion_format_exp(e) for e in expiries]
         strike_labels = [f"{s:g}" for s in strikes]
 
-        vmax = _compute_color_scale(mat, mode)
+        # Same cube-root color transform as the single-ticker view —
+        # text labels keep raw dollars, z carries compressed magnitudes.
+        z_color = _color_transform(mat)
+        vmax = _compute_color_scale(z_color, mode)
 
         text_grid = [[_fmt_cell(mat[i, j]) for j in range(mat.shape[1])]
                      for i in range(mat.shape[0])]
 
         fig.add_trace(
             go.Heatmap(
-                z=mat,
+                z=z_color,
+                customdata=mat,
                 x=exp_labels,
                 y=strike_labels,
                 zmin=-vmax, zmax=vmax,
                 colorscale=SKYLIT_COLORSCALE,
                 showscale=(idx == 3),
+                colorbar=dict(showticklabels=False) if idx == 3 else None,
                 xgap=2, ygap=2,
                 text=text_grid,
                 texttemplate="%{text}",
                 textfont=dict(size=8, color=TEXT, family=MONO),
-                hovertemplate=f"{tkr}<br>Strike %{{y}}<br>Expiry %{{x}}<br>{MODE_LABELS.get(mode, mode.upper())} $%{{z:.0f}}k<extra></extra>",
+                hovertemplate=f"{tkr}<br>Strike %{{y}}<br>Expiry %{{x}}<br>{MODE_LABELS.get(mode, mode.upper())} $%{{customdata:.0f}}k<extra></extra>",
             ),
             row=1, col=idx,
         )
         if nodes and nodes.sirius is not None:
-            kx = _trinity_format_exp(nodes.sirius.expiry)
+            kx = _orion_format_exp(nodes.sirius.expiry)
             ky = f"{nodes.sirius.strike:g}"
             if kx in exp_labels and ky in strike_labels:
                 x_idx = exp_labels.index(kx)
@@ -457,7 +486,7 @@ def _build_trinity_figure(cache, mode: str = "gex") -> go.Figure:
         plot_bgcolor=BG_BLACK,
         height=680,
         title=dict(
-            text=f"TRINITY  ·  {MODE_LABELS.get(mode, mode.upper()).upper()}",
+            text=f"ORION  ·  {MODE_LABELS.get(mode, mode.upper()).upper()}",
             font=dict(family=MONO, size=11, color=ORANGE),
             x=0.01,
             y=0.985,
@@ -643,7 +672,7 @@ def create_app(cache, tickers: list[str]) -> Dash:
                     dcc.Dropdown(
                         id="ticker-select",
                         options=[{"label": t, "value": t} for t in tickers]
-                                + [{"label": "TRINITY", "value": "TRINITY"}],
+                                + [{"label": "ORION", "value": "ORION"}],
                         value="SPY",
                         clearable=False,
                         style={
@@ -843,9 +872,9 @@ def create_app(cache, tickers: list[str]) -> Dash:
         banner = _build_stale_banner(status)
         blurb = MODE_BLURBS.get(mode, "")
 
-        if ticker == "TRINITY":
-            fig = _build_trinity_figure(cache, mode)
-            # Use first available ticker for header info in trinity mode
+        if ticker == "ORION":
+            fig = _build_orion_figure(cache, mode)
+            # Use first available ticker for header info in Orion mode
             for t in ("SPY", "SPX", "QQQ"):
                 grid = cache.get_grid(t)
                 nodes = cache.get_nodes(t)
@@ -853,7 +882,7 @@ def create_app(cache, tickers: list[str]) -> Dash:
                     break
             reshuffle_age = cache.sirius_reshuffle_age(t) if grid else None
             header = _build_header_cells(grid, nodes, reshuffle_age)
-            status_bar = self_format_status_bar(grid, nodes, mode, "TRINITY", reshuffle_age)
+            status_bar = self_format_status_bar(grid, nodes, mode, "ORION", reshuffle_age)
             return fig, badge, banner, header, status_bar, blurb
 
         grid = cache.get_grid(ticker)
