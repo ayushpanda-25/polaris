@@ -525,6 +525,12 @@ def create_app(cache, tickers: list[str]) -> Dash:
     # Assets folder is at project root, not next to this script
     assets_path = str(Path(__file__).resolve().parents[1] / "assets")
     app = Dash(__name__, title="Polaris", assets_folder=assets_path)
+
+    # Auth gate — login page before Dash loads. Must come before
+    # register_learn_route so /login takes priority.
+    from .auth import register_auth
+    register_auth(app.server)
+
     register_learn_route(app.server)
 
     # Reusable cell builders ---------------------------------------

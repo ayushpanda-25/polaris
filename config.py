@@ -1,4 +1,5 @@
 """Global configuration for skylit-replica."""
+import os
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent
@@ -27,3 +28,18 @@ STRUCTURED_PRODUCT_STRIKES = {
 # GEX heatmap presentation
 STRIKE_WINDOW_PCT = 0.05  # +/- 5% around spot
 MAX_EXPIRIES = 8          # Columns in heatmap
+
+# ── Authentication ─────────────────────────────────────────────────
+# Flask session signing key. Override via env var in production.
+SESSION_SECRET = os.environ.get(
+    "POLARIS_SESSION_SECRET", "polaris-dev-key-change-in-prod"
+)
+# Astraios member access codes. Friends enter one of these instead of
+# an LSEG key. Case-insensitive matching.
+FRIEND_CODES = [
+    c.strip()
+    for c in os.environ.get("POLARIS_FRIEND_CODES", "ASTRAIOS-2026").split(",")
+    if c.strip()
+]
+# Public demo URL (Vercel synthetic data deployment)
+DEMO_URL = "https://polaris-omega-five.vercel.app"
