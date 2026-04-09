@@ -160,6 +160,55 @@ def _add_bracket_corners(
         )
 
 
+def _compute_color_scale(mat: np.ndarray, mode: str) -> float:
+    """
+    Symmetric color-scale half-range for the GEX heatmap.
+
+    The old implementation used the 95th percentile of |mat|, which on panic
+    selloff days gets dominated by a handful of ATM outliers (e.g. 0DTE pin
+    strikes driven to $20B+ by the volume-as-OI fallback). When a few cells
+    span ±$30B and the rest live in ±$500M, symmetric ±vmax painted every
+    non-ATM cell as effectively black — the dashboard looked half-empty.
+
+    Fix: use a lower percentile (median for bulk cells) scaled by a fixed
+    factor. This gives mid-range strikes visible color while still letting
+    ATM outliers "peg" the top of the scale.
+    """
+    nz = np.abs(mat[mat != 0])
+    if nz.size == 0:
+        return 1.0
+    if mode == "color":
+        # Color (∂Γ/∂t) mode has tighter native dynamic range; keep the
+        # old behavior so 75th percentile scaling matches existing reads.
+        vmax = float(np.percentile(nz, 75))
+    else:
+        # Median × 4 tracks "typical" cells instead of being dragged by
+        # a handful of ATM monsters. On a calm day median ~ mean so this
+        # is equivalent to the old scale; on a panic day it clamps to
+        # something readable for 95% of the grid.
+        vmax = float(np.median(nz) * 4.0)
+    return vmax if vmax > 0 else 1.0
+
+
+def _fmt_cell(v: float) -> str:
+    """
+    Format one heatmap cell label.
+
+    Three tiers:
+        >= $1M     "$12.3M"
+        >= $0.5K   "$620K"
+        < $0.5K    "·"    (dim placeholder so the cell doesn't look broken)
+
+    The placeholder matters because deep-OTM strikes have real-but-tiny GEX;
+    printing an empty string made users think half the grid wasn't rendering.
+    """
+    if abs(v) < 0.5:
+        return "·"
+    if abs(v) >= 1000:
+        return f"${v / 1000:,.1f}M"
+    return f"${v:,.0f}K"
+
+
 def _build_heatmap_figure(grid: GEXGrid, nodes: NodeMap, mode: str = "gex") -> go.Figure:
     if grid is None or not grid.cells:
         return go.Figure(
@@ -198,27 +247,11 @@ def _build_heatmap_figure(grid: GEXGrid, nodes: NodeMap, mode: str = "gex") -> g
     expiry_labels = [_format_exp(e) for e in expiries]
     strike_labels = [f"{s:g}" for s in strikes]
 
-    # Cap the color scale at a percentile to suppress outliers.
-    nz = np.abs(mat[mat != 0])
-    if nz.size == 0:
-        vmax = 1.0
-    elif mode == "color":
-        vmax = float(np.percentile(nz, 75))
-    else:
-        vmax = float(np.percentile(nz, 95))
-    if vmax == 0:
-        vmax = 1.0
+    # Clamp color scale against ATM outliers and label every cell (including
+    # near-zero ones, which get a dim placeholder instead of empty string).
+    vmax = _compute_color_scale(mat, mode)
 
-    # Format every cell value compactly. Skylit labels EVERY cell — and we
-    # can too now that columns are equal-width. For values < $1k, hide.
-    def _fmt(v: float) -> str:
-        if abs(v) < 0.5:
-            return ""
-        if abs(v) >= 1000:
-            return f"${v / 1000:,.1f}M"
-        return f"${v:,.0f}K"
-
-    text_grid = [[_fmt(mat[i, j]) for j in range(mat.shape[1])]
+    text_grid = [[_fmt_cell(mat[i, j]) for j in range(mat.shape[1])]
                  for i in range(mat.shape[0])]
 
     mode_label = MODE_LABELS.get(mode, mode.upper())
@@ -384,20 +417,9 @@ def _build_trinity_figure(cache, mode: str = "gex") -> go.Figure:
         exp_labels = [_trinity_format_exp(e) for e in expiries]
         strike_labels = [f"{s:g}" for s in strikes]
 
-        nz = np.abs(mat[mat != 0])
-        vmax = float(np.percentile(nz, 95)) if nz.size else 1.0
-        if vmax == 0:
-            vmax = 1.0
+        vmax = _compute_color_scale(mat, mode)
 
-        # Cell labels (same convention as single-ticker view)
-        def _fmt(v: float) -> str:
-            if abs(v) < 0.5:
-                return ""
-            if abs(v) >= 1000:
-                return f"${v / 1000:,.1f}M"
-            return f"${v:,.0f}K"
-
-        text_grid = [[_fmt(mat[i, j]) for j in range(mat.shape[1])]
+        text_grid = [[_fmt_cell(mat[i, j]) for j in range(mat.shape[1])]
                      for i in range(mat.shape[0])]
 
         fig.add_trace(

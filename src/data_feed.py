@@ -283,6 +283,11 @@ class LSEGOptionsFeed:
         self._started = False
         self._rd = None
         self.timeout_sec = timeout_sec
+        # EOD OI cache: ticker -> (fetch_date, {ric: oi}). Refetched once per
+        # day via rd.get_history. Proper source — snapshot OPEN_INT returns
+        # NA on desktop tier and the volume fallback over-inflates on active
+        # days.
+        self._eod_oi_cache: dict[str, tuple[date, dict[str, float]]] = {}
 
     def _ensure_session(self):
         if self._started:
@@ -298,7 +303,133 @@ class LSEGOptionsFeed:
                 f"Is LSEG Workspace running and signed in? Error: {e}"
             ) from e
 
-    def _get_data_with_timeout(self, rics: list[str], fields: list[str]):
+    def _fetch_eod_oi(self, rics: list[str]) -> dict[str, float]:
+        """
+        Fetch the most recent EOD Open Interest per RIC via the TR.* data
+        item namespace (point-in-time historical fields, accessible through
+        rd.get_data rather than real-time get_history).
+
+        Tried in order until one returns a wide DataFrame with OI values:
+            TR.OpenInterest
+            TR.OpenInterest.date
+            OPEN_INT_ACC        (accumulated OI, sometimes populated on
+                                 desktop tier when OPEN_INT is NA)
+
+        Returns {ric: oi}. RICs with no data are absent. All failures are
+        caught and logged — caller falls back to the legacy OI chain.
+        """
+        if not rics:
+            return {}
+        out: dict[str, float] = {}
+        # TR.* fields are much slower than real-time fields on desktop tier.
+        # Small chunks + long per-chunk timeout, AND fail-fast if the first
+        # chunk times out entirely (don't burn 60s across 4 failing chunks).
+        chunk_size = 25
+        per_chunk_timeout = 30
+        n_chunks = (len(rics) + chunk_size - 1) // chunk_size
+        # Try fields in priority order. First one that returns any populated
+        # rows wins for the rest of the batch.
+        candidate_fieldsets = [
+            ["TR.OpenInterest"],
+            ["OPEN_INT_ACC"],
+        ]
+        first_chunk_timed_out = False
+        for i in range(0, len(rics), chunk_size):
+            chunk_idx = i // chunk_size + 1
+            chunk = rics[i : i + chunk_size]
+            if first_chunk_timed_out:
+                # Abandon the rest — TR.* is clearly unresponsive right now.
+                break
+            chunk_out: dict[str, float] = {}
+            for fields in candidate_fieldsets:
+                try:
+                    df = self._get_data_with_timeout(
+                        chunk, fields, timeout_override=per_chunk_timeout
+                    )
+                except TimeoutError as e:
+                    print(
+                        f"[lseg_feed] EOD OI chunk {chunk_idx}/{n_chunks} "
+                        f"{fields[0]} timed out",
+                        flush=True,
+                    )
+                    if chunk_idx == 1:
+                        first_chunk_timed_out = True
+                    continue
+                except Exception as e:
+                    print(
+                        f"[lseg_feed] EOD OI chunk {chunk_idx}/{n_chunks} "
+                        f"{fields[0]} failed: {type(e).__name__}: {e}",
+                        flush=True,
+                    )
+                    continue
+                if df is None or getattr(df, "empty", True):
+                    continue
+                # rd.get_data returns a flat DataFrame with an Instrument
+                # column + one column per field. Find the instrument column
+                # (same logic as the main snapshot path).
+                ric_col = None
+                for col in ("Instrument", "instrument", "RIC", "Ric"):
+                    if col in df.columns:
+                        ric_col = col
+                        break
+                if ric_col is None:
+                    continue
+                # Value column: the first non-instrument column (TR.* field
+                # names can come back as "Open Interest" rather than the
+                # literal field name).
+                val_col = None
+                for col in df.columns:
+                    if col != ric_col:
+                        val_col = col
+                        break
+                if val_col is None:
+                    continue
+                for _, row in df.iterrows():
+                    ric = str(row[ric_col])
+                    raw = row[val_col]
+                    val = self._clean_float(raw)
+                    if val is not None and val > 0:
+                        chunk_out[ric] = val
+                if chunk_out:
+                    break  # this fieldset worked, don't try the next
+            out.update(chunk_out)
+        return out
+
+    def _get_eod_oi_cached(
+        self, ticker: str, rics: list[str]
+    ) -> dict[str, float]:
+        """Fetch-once-per-day wrapper around _fetch_eod_oi. Swallows all
+        errors and returns an empty dict on failure, so the caller can
+        always fall through to the legacy OI chain."""
+        today = date.today()
+        cached = self._eod_oi_cache.get(ticker)
+        if cached and cached[0] == today:
+            return cached[1]
+        try:
+            print(
+                f"[lseg_feed] fetching EOD OI for {ticker} "
+                f"({len(rics)} rics)...",
+                flush=True,
+            )
+            oi_map = self._fetch_eod_oi(rics)
+            print(
+                f"[lseg_feed] EOD OI for {ticker}: "
+                f"{len(oi_map)}/{len(rics)} populated",
+                flush=True,
+            )
+        except Exception as e:
+            print(
+                f"[lseg_feed] EOD OI fetch failed for {ticker}: "
+                f"{type(e).__name__}: {e}",
+                flush=True,
+            )
+            oi_map = {}
+        self._eod_oi_cache[ticker] = (today, oi_map)
+        return oi_map
+
+    def _get_data_with_timeout(
+        self, rics: list[str], fields: list[str], timeout_override: int | None = None
+    ):
         """rd.get_data wrapped in a daemon thread to enforce hard timeout."""
         import threading
         result = {"df": None, "err": None}
@@ -311,10 +442,11 @@ class LSEGOptionsFeed:
 
         t = threading.Thread(target=_runner, daemon=True)
         t.start()
-        t.join(timeout=self.timeout_sec)
+        timeout = timeout_override if timeout_override is not None else self.timeout_sec
+        t.join(timeout=timeout)
         if t.is_alive():
             raise TimeoutError(
-                f"rd.get_data timed out after {self.timeout_sec}s "
+                f"rd.get_data timed out after {timeout}s "
                 f"(off-hours or feed unresponsive)"
             )
         if result["err"]:
@@ -399,6 +531,13 @@ class LSEGOptionsFeed:
         import pandas as pd
         df = pd.concat(frames, ignore_index=True)
 
+        # Fetch EOD OI once per day per ticker. Proper source — snapshot
+        # OPEN_INT returns NA on desktop tier, and the intraday volume
+        # fallback inflates magnitudes ~30x on active days. EOD history
+        # doesn't have that problem. Any failure here falls through
+        # silently to the existing OI chain below.
+        eod_oi_by_ric = self._get_eod_oi_cached(ticker, all_rics)
+
         # CRITICAL: rows MUST be matched by an Instrument column.
         # Falling back to positional matching is unsafe — LSEG can reorder
         # results, especially after failed lookups within a batch.
@@ -427,17 +566,22 @@ class LSEGOptionsFeed:
             if row is None:
                 continue
 
-            oi = self._clean_float(row.get("OPEN_INT"))
             iv = self._clean_float(row.get("IMPL_VOL"))
             delta = self._clean_float(row.get("DELTA"))
             volume = self._clean_float(row.get("CF_VOLUME"))
 
-            # ── OI fallback: LSEG desktop tier often returns NA for OI on
-            #    US single-name options. Fall back to same-day volume as
-            #    a proxy — it's not perfect (volume != OI) but it's a
-            #    real magnitude signal that lets us produce a usable GEX
-            #    surface intraday. EOD OI reconciliation (scripts/
-            #    backfill_eod.py) will tighten this later.
+            # ── OI resolution order:
+            #   1. Yesterday's EOD OI from rd.get_history (fetched once/day)
+            #      — proper source, stable magnitudes, preferred.
+            #   2. Live snapshot OPEN_INT — often NA on desktop tier, but
+            #      populated for some deep-OTM strikes even when history
+            #      has gaps.
+            #   3. Today's volume fallback — last resort, inflates
+            #      magnitudes on active days but keeps the heatmap from
+            #      being completely empty.
+            oi = eod_oi_by_ric.get(ric)
+            if oi is None or oi <= 0:
+                oi = self._clean_float(row.get("OPEN_INT"))
             if oi is None or oi <= 0:
                 if volume is not None and volume > 0:
                     oi = volume
