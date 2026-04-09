@@ -309,7 +309,7 @@ def register_auth(server: Flask) -> None:
                 session["ts"] = int(time.time())
                 return redirect("/")
             return Response(
-                _login_html(error="Invalid LSEG API key format. Expected 32+ hex characters."),
+                _login_html(error="Invalid LSEG API key."),
                 mimetype="text/html; charset=utf-8",
             )
 
