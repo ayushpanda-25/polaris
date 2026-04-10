@@ -691,26 +691,11 @@ class LSEGOptionsFeed:
         expiries = _next_expiries(N_EXPIRIES)
 
         rics_meta: list[tuple[str, float, str, date]] = []
-        seen_rics: set[str] = set()
         for exp in expiries:
             for strike in strikes:
                 for otype in ("C", "P"):
                     ric = build_option_ric(ticker, exp, otype, strike)
-                    if ric not in seen_rics:
-                        rics_meta.append((ric, strike, otype, exp))
-                        seen_rics.add(ric)
-                    # SPX: also fetch monthly contracts (SPX root alongside
-                    # SPXW weekly root). Monthly SPX carries huge institutional
-                    # OI (JPM collar, pension hedges) that shifts the Sirius
-                    # node location. For non-monthly expiries LSEG simply
-                    # returns no data — handled gracefully.
-                    if ticker.upper() == "SPX":
-                        monthly_ric = build_option_ric(
-                            ticker, exp, otype, strike, root_override="SPX"
-                        )
-                        if monthly_ric not in seen_rics:
-                            rics_meta.append((monthly_ric, strike, otype, exp))
-                            seen_rics.add(monthly_ric)
+                    rics_meta.append((ric, strike, otype, exp))
 
         all_rics = [m[0] for m in rics_meta]
 
