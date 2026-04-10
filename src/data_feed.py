@@ -235,10 +235,18 @@ RISK_FREE_RATE = 0.045
 
 STRIKE_STEPS = {
     "SPY": 1.0, "QQQ": 1.0,
-    "SPX": 25.0,
+    "SPX": 5.0,   # SPXW weeklies trade at $5 near ATM (was 25, too coarse)
     "AAPL": 2.5, "MSFT": 2.5, "NVDA": 2.5,
     "TSLA": 5.0, "AMZN": 5.0, "GOOGL": 5.0, "META": 5.0,
 }
+
+# Per-ticker strike count override. Default n_each_side=15 works for SPY
+# ($1 steps × 15 = ±$15 = ±2.2%). SPX needs more because $5 steps × 15
+# = only ±$75 (±1.1%), far narrower than the ±3% display window.
+N_STRIKES_EACH_SIDE = {
+    "SPX": 50,    # $5 × 50 = ±$250 = ±3.7% at 6800 spot → ~101 strikes
+}
+DEFAULT_N_STRIKES = 15
 
 OPTION_FIELDS = [
     "CF_BID", "CF_ASK", "CF_LAST", "CF_VOLUME",
@@ -648,7 +656,8 @@ class LSEGOptionsFeed:
 
         spot = self._fetch_spot(ticker)
         step = STRIKE_STEPS.get(ticker.upper(), 5.0)
-        strikes = _generate_strikes(spot, step, n_each_side=15)
+        n_side = N_STRIKES_EACH_SIDE.get(ticker.upper(), DEFAULT_N_STRIKES)
+        strikes = _generate_strikes(spot, step, n_each_side=n_side)
         expiries = _next_expiries(N_EXPIRIES)
 
         rics_meta: list[tuple[str, float, str, date]] = []
