@@ -243,9 +243,6 @@ STRIKE_STEPS = {
 # Per-ticker strike count override. Default n_each_side=15 works for SPY
 # ($1 steps × 15 = ±$15 = ±2.2%). SPX needs more because $5 steps × 15
 # = only ±$75 (±1.1%), far narrower than the ±3% display window.
-N_STRIKES_EACH_SIDE = {
-    "SPX": 50,    # $5 × 50 = ±$250 = ±3.7% at 6800 spot → ~101 strikes
-}
 DEFAULT_N_STRIKES = 15
 
 OPTION_FIELDS = [
@@ -275,6 +272,36 @@ def _next_expiries(n: int = N_EXPIRIES) -> list[date]:
 def _generate_strikes(spot: float, step: float, n_each_side: int = 15) -> list[float]:
     atm = round(spot / step) * step
     return [round(atm + i * step, 2) for i in range(-n_each_side, n_each_side + 1)]
+
+
+# SPX uses a tiered strike grid: $5 near ATM (where liquidity is),
+# $25 further out (matching CBOE's actual listing pattern). This gives
+# ~50 strikes total — dense where it matters, sparse in the wings.
+SPX_FINE_STEP = 5.0       # near ATM
+SPX_COARSE_STEP = 25.0    # wings
+SPX_FINE_RANGE = 100.0    # ±$100 from ATM uses $5 steps
+
+
+def _generate_spx_strikes(spot: float) -> list[float]:
+    """Tiered SPX strike grid: $5 near ATM, $25 in the wings."""
+    atm = round(spot / SPX_FINE_STEP) * SPX_FINE_STEP
+    strikes = set()
+
+    # Fine grid: ATM ± $100 at $5 steps
+    n_fine = int(SPX_FINE_RANGE / SPX_FINE_STEP)
+    for i in range(-n_fine, n_fine + 1):
+        strikes.add(round(atm + i * SPX_FINE_STEP, 2))
+
+    # Coarse grid: extend to ±3% at $25 steps
+    lo = spot * 0.97
+    hi = spot * 1.03
+    coarse_start = round(lo / SPX_COARSE_STEP) * SPX_COARSE_STEP
+    s = coarse_start
+    while s <= hi:
+        strikes.add(round(s, 2))
+        s += SPX_COARSE_STEP
+
+    return sorted(strikes)
 
 
 class LSEGOptionsFeed:
@@ -655,9 +682,11 @@ class LSEGOptionsFeed:
         self._ensure_session()
 
         spot = self._fetch_spot(ticker)
-        step = STRIKE_STEPS.get(ticker.upper(), 5.0)
-        n_side = N_STRIKES_EACH_SIDE.get(ticker.upper(), DEFAULT_N_STRIKES)
-        strikes = _generate_strikes(spot, step, n_each_side=n_side)
+        if ticker.upper() == "SPX":
+            strikes = _generate_spx_strikes(spot)
+        else:
+            step = STRIKE_STEPS.get(ticker.upper(), 5.0)
+            strikes = _generate_strikes(spot, step, n_each_side=DEFAULT_N_STRIKES)
         expiries = _next_expiries(N_EXPIRIES)
 
         rics_meta: list[tuple[str, float, str, date]] = []
