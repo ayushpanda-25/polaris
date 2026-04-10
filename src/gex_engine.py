@@ -1,20 +1,35 @@
 """
 GEX / VEX computation engine.
 
-Formulas (industry-standard, SqueezeMetrics / Skylit convention):
+Formulas (industry-standard, SpotGamma / Barchart / academic convention):
     GEX_strike = Σ over contracts at that strike of:
-        gamma * OI * contract_size * spot * dealer_sign
+        gamma * OI * contract_size * spot² * 0.01 * dealer_sign
 
     VEX_strike = Σ over contracts at that strike of:
-        vanna * OI * contract_size * spot * dealer_sign
+        vanna * OI * contract_size * spot * 0.01 * dealer_sign
 
 Where:
-    dealer_sign = +1 if dealer is long the contract, -1 if short
-                  (see sign_imputation.py)
+    dealer_sign = +1 for calls (dealer short call → long gamma → stabilizing)
+                  -1 for puts  (dealer short put → short gamma → destabilizing)
     contract_size = 100 for standard US equity options
-    Units: $ of delta-hedging flow per $1 move in the underlying
+    0.01 = 1 percent move
 
-Returned values are in thousands of dollars to match Skylit's display units.
+    Units: $ of delta-hedging flow per 1% move in the underlying.
+
+Derivation: for a 1% move (dS = 0.01 × S), the hedging flow per contract
+is Γ × dS × S × 100 = Γ × 0.01 × S × S × 100 = Γ × 100 × S² × 0.01.
+
+The per-$1-move variant (SqueezeMetrics original) uses Γ × OI × 100 (in
+shares) or Γ × OI × 100 × S (in dollars). Both are correct but measure
+different things. The per-1%-move form is the industry display standard.
+
+References:
+    - SqueezeMetrics white paper (squeezemetrics.com)
+    - SpotGamma GEX documentation (spotgamma.com)
+    - Barbon & Buraschi "Gamma Fragility" (2021)
+    - Perfiliev "How to Calculate GEX" (perfiliev.com)
+
+Returned values are in thousands of dollars.
 """
 from __future__ import annotations
 
@@ -28,6 +43,7 @@ import pandas as pd
 
 
 CONTRACT_SIZE = 100       # standard US equity option multiplier
+PCT_MOVE = 0.01           # 1% move basis
 THOUSANDS = 1_000         # display unit
 
 
@@ -55,7 +71,14 @@ class OptionContract:
     color: float = 0.0    # ∂Γ/∂t — optional, 0 if not populated
 
     def gex_dollars(self, spot: float) -> float:
-        """GEX in raw dollars — delta-hedging flow per $1 move in the underlying."""
+        """GEX in dollars — delta-hedging flow per $1 move in the underlying.
+
+        This is the SqueezeMetrics / Skylit convention (per-$1-move):
+            Gamma × OI × 100 × Spot × sign
+
+        SpotGamma uses a per-1%-move variant (× Spot² × 0.01) which gives
+        values ~68x larger for SPX. We match Skylit's convention.
+        """
         return (
             self.gamma
             * self.open_interest
@@ -65,7 +88,7 @@ class OptionContract:
         )
 
     def vex_dollars(self, spot: float) -> float:
-        """VEX in raw dollars — vanna-hedging flow per 1 vol point move."""
+        """VEX in dollars — vanna-hedging flow per $1 move."""
         return (
             self.vanna
             * self.open_interest
