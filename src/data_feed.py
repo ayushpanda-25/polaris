@@ -249,11 +249,12 @@ OPTION_FIELDS = [
     "CF_BID", "CF_ASK", "CF_LAST", "CF_VOLUME",
     # Open interest: OPEN_INT returns <NA> on desktop tier for US listed
     # options, but OPINT_1 returns real values via the same REST call.
-    # Confirmed for SPY and SPX option RICs on 2026-04-08. OPEN_INT is
-    # kept in the list as a secondary probe in case OPINT_1 ever goes
-    # dark or the tier changes.
     "OPINT_1", "OPEN_INT",
     "IMPL_VOL", "DELTA",
+    # Native greeks from LSEG — confirmed available via streaming snapshot
+    # (2026-04-08 diagnostic). REST may also return them. If present, we
+    # use them directly instead of computing via Black-Scholes from IV.
+    "GAMMA",
 ]
 
 
@@ -690,11 +691,26 @@ class LSEGOptionsFeed:
         expiries = _next_expiries(N_EXPIRIES)
 
         rics_meta: list[tuple[str, float, str, date]] = []
+        seen_rics: set[str] = set()
         for exp in expiries:
             for strike in strikes:
                 for otype in ("C", "P"):
                     ric = build_option_ric(ticker, exp, otype, strike)
-                    rics_meta.append((ric, strike, otype, exp))
+                    if ric not in seen_rics:
+                        rics_meta.append((ric, strike, otype, exp))
+                        seen_rics.add(ric)
+                    # SPX: also fetch monthly contracts (SPX root alongside
+                    # SPXW weekly root). Monthly SPX carries huge institutional
+                    # OI (JPM collar, pension hedges) that shifts the Sirius
+                    # node location. For non-monthly expiries LSEG simply
+                    # returns no data — handled gracefully.
+                    if ticker.upper() == "SPX":
+                        monthly_ric = build_option_ric(
+                            ticker, exp, otype, strike, root_override="SPX"
+                        )
+                        if monthly_ric not in seen_rics:
+                            rics_meta.append((monthly_ric, strike, otype, exp))
+                            seen_rics.add(monthly_ric)
 
         all_rics = [m[0] for m in rics_meta]
 
@@ -837,7 +853,15 @@ class LSEGOptionsFeed:
             if T == 0:
                 T = 0.5 / 365.0  # 0DTE: half a day keeps BS math sane
 
-            gamma = bs_gamma(spot, strike, T, RISK_FREE_RATE, iv)
+            # Prefer native LSEG GAMMA when available — it's computed from
+            # the exchange's own pricing model and avoids the error chain of
+            # delta → invert IV → BS gamma. Fall back to BS when LSEG
+            # returns NA (common for illiquid wing strikes).
+            native_gamma = self._clean_float(row.get("GAMMA"))
+            if native_gamma is not None and native_gamma > 0:
+                gamma = native_gamma
+            else:
+                gamma = bs_gamma(spot, strike, T, RISK_FREE_RATE, iv)
             vanna = bs_vanna(spot, strike, T, RISK_FREE_RATE, iv)
             color = bs_color(spot, strike, T, RISK_FREE_RATE, iv)
 

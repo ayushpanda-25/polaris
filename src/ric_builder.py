@@ -57,6 +57,7 @@ def build_option_ric(
     expiry: date,
     option_type: str,
     strike: float,
+    root_override: str | None = None,
 ) -> str:
     """
     Build an LSEG option RIC string.
@@ -79,8 +80,15 @@ def build_option_ric(
     if option_type.upper() not in ("C", "P"):
         raise ValueError(f"option_type must be C or P, got {option_type}")
 
-    # Route SPX → SPXW for weekly chains (which is what Skylit shows)
-    root = "SPXW" if underlying.upper() == "SPX" else underlying.upper()
+    # Route SPX → SPXW for weekly chains by default. Monthly SPX
+    # contracts use the "SPX" root — call with root_override="SPX" to
+    # generate those RICs.
+    if root_override:
+        root = root_override
+    elif underlying.upper() == "SPX":
+        root = "SPXW"
+    else:
+        root = underlying.upper()
 
     # LSEG convention (from flow-terminal/local_bridge.py):
     # - Strike < 1000: uppercase month code, strike * 100 (integer)

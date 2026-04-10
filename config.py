@@ -21,8 +21,10 @@ DASHBOARD_POLL = 5        # Dash polls memory cache
 # Sign imputation layer config
 OVERWRITING_WHITELIST = {"AAPL", "NVDA", "MSFT", "TSLA"}
 STRUCTURED_PRODUCT_STRIKES = {
-    # (low, high) SPX strike bands where JPM collar typically sits
-    "SPX": [(5800, 6200)],
+    # (low, high) SPX strike bands where JPM Hedged Equity collar sits.
+    # The collar rolls quarterly; these are approximate Q2 2026 levels
+    # with SPX ~6800. Update after each quarterly roll.
+    "SPX": [(6100, 6300), (7100, 7300)],
 }
 
 # GEX heatmap presentation

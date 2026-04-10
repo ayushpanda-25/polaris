@@ -1,18 +1,18 @@
 """
 GEX / VEX computation engine.
 
-Formulas (industry-standard, SqueezeMetrics white paper):
+Formulas (industry-standard, SqueezeMetrics / Skylit convention):
     GEX_strike = Σ over contracts at that strike of:
-        gamma * OI * contract_size * spot² * 0.01 * dealer_sign
+        gamma * OI * contract_size * spot * dealer_sign
 
     VEX_strike = Σ over contracts at that strike of:
-        vanna * OI * contract_size * spot * 0.01 * dealer_sign
+        vanna * OI * contract_size * spot * dealer_sign
 
 Where:
     dealer_sign = +1 if dealer is long the contract, -1 if short
                   (see sign_imputation.py)
     contract_size = 100 for standard US equity options
-    0.01 = 1 percent move (units: $ per 1% move)
+    Units: $ of delta-hedging flow per $1 move in the underlying
 
 Returned values are in thousands of dollars to match Skylit's display units.
 """
@@ -28,7 +28,6 @@ import pandas as pd
 
 
 CONTRACT_SIZE = 100       # standard US equity option multiplier
-PCT_MOVE = 0.01           # 1% move basis for GEX/VEX
 THOUSANDS = 1_000         # display unit
 
 
@@ -56,24 +55,22 @@ class OptionContract:
     color: float = 0.0    # ∂Γ/∂t — optional, 0 if not populated
 
     def gex_dollars(self, spot: float) -> float:
-        """GEX in raw dollars per 1% move."""
+        """GEX in raw dollars — delta-hedging flow per $1 move in the underlying."""
         return (
             self.gamma
             * self.open_interest
             * CONTRACT_SIZE
-            * spot ** 2
-            * PCT_MOVE
+            * spot
             * self.dealer_sign
         )
 
     def vex_dollars(self, spot: float) -> float:
-        """VEX in raw dollars per 1% vol move."""
+        """VEX in raw dollars — vanna-hedging flow per 1 vol point move."""
         return (
             self.vanna
             * self.open_interest
             * CONTRACT_SIZE
             * spot
-            * PCT_MOVE
             * self.dealer_sign
         )
 
@@ -83,8 +80,7 @@ class OptionContract:
             self.color
             * self.open_interest
             * CONTRACT_SIZE
-            * spot ** 2
-            * PCT_MOVE
+            * spot
             * self.dealer_sign
         )
 

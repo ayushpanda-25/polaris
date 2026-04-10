@@ -13,7 +13,8 @@ from src.gex_engine import (
 
 
 def test_single_atm_call_gex():
-    """Hand-computed: SPY $500, gamma 0.02, OI 1000, dealer short (-1)."""
+    """Hand-computed: SPY $500, gamma 0.02, OI 1000, dealer short (-1).
+    Formula: gamma * OI * 100 * spot * dealer_sign ($ per $1 move)."""
     c = OptionContract(
         strike=500.0,
         expiry="2026-04-18",
@@ -24,8 +25,8 @@ def test_single_atm_call_gex():
         dealer_sign=-1,
     )
     spot = 500.0
-    # 0.02 * 1000 * 100 * 500^2 * 0.01 * -1 = -5,000,000
-    expected = -5_000_000.0
+    # 0.02 * 1000 * 100 * 500 * -1 = -1,000,000
+    expected = -1_000_000.0
     assert math.isclose(c.gex_dollars(spot), expected)
 
 
@@ -42,12 +43,12 @@ def test_compute_grid_aggregates_by_strike_and_expiry():
     assert len(grid.cells) == 2  # two unique (strike, expiry) pairs
 
     cell_500 = next(c for c in grid.cells if c.strike == 500.0)
-    # (0.02*1000 + 0.02*500) * 100 * 500^2 * 0.01 * -1 / 1000 = -7500
-    assert math.isclose(cell_500.gex_value, -7500.0)
+    # (0.02*1000 + 0.02*500) * 100 * 500 * -1 / 1000 = -1500
+    assert math.isclose(cell_500.gex_value, -1500.0)
 
 
 def test_vex_formula_uses_linear_spot():
-    """VEX uses spot (not spot^2) so units are per-vol-point."""
+    """VEX uses spot (not spot^2) — $ per 1 vol point move."""
     c = OptionContract(
         strike=500.0,
         expiry="2026-04-18",
@@ -57,8 +58,8 @@ def test_vex_formula_uses_linear_spot():
         open_interest=1000,
         dealer_sign=+1,
     )
-    # 0.01 * 1000 * 100 * 500 * 0.01 * 1 = 5000
-    assert math.isclose(c.vex_dollars(500.0), 5000.0)
+    # 0.01 * 1000 * 100 * 500 * 1 = 500,000
+    assert math.isclose(c.vex_dollars(500.0), 500_000.0)
 
 
 def test_grid_as_matrix_shape():
