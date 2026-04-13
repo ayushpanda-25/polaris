@@ -322,7 +322,7 @@ class LSEGOptionsFeed:
           from IV and spot
     """
 
-    def __init__(self, timeout_sec: int = 15):
+    def __init__(self, timeout_sec: int = 30):
         self._started = False
         self._rd = None
         self.timeout_sec = timeout_sec
