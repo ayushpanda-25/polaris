@@ -54,10 +54,10 @@ def test_clock_skew_treated_as_live():
 
 def test_color_codes():
     now = 1_000_000.0
-    assert evaluate_freshness(int(now - 5), now=now).color == "#3edc81"  # green
-    assert evaluate_freshness(int(now - 60), now=now).color == "#f9d649"  # yellow
-    assert evaluate_freshness(int(now - 200), now=now).color == "#ff5959"  # red
-    assert evaluate_freshness(None).color == "#7a7a7a"  # grey
+    assert evaluate_freshness(int(now - 5), now=now).color == "#30d158"  # green
+    assert evaluate_freshness(int(now - 60), now=now).color == "#ffb340"  # amber
+    assert evaluate_freshness(int(now - 200), now=now).color == "#ff453a"  # red
+    assert evaluate_freshness(None).color == "rgba(255,255,255,0.40)"  # grey
 
 
 def test_format_age_human_readable():

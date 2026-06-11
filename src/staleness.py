@@ -50,10 +50,10 @@ class FreshnessStatus:
     @property
     def color(self) -> str:
         return {
-            FreshnessState.LIVE: "#3edc81",      # green
-            FreshnessState.LAGGING: "#f9d649",   # yellow
-            FreshnessState.STALE: "#ff5959",     # red
-            FreshnessState.OFFLINE: "#7a7a7a",   # grey
+            FreshnessState.LIVE: "#30d158",      # green
+            FreshnessState.LAGGING: "#ffb340",   # amber
+            FreshnessState.STALE: "#ff453a",     # red
+            FreshnessState.OFFLINE: "rgba(255,255,255,0.40)",   # grey
         }[self.state]
 
     @property

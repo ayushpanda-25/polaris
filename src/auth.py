@@ -35,46 +35,38 @@ _LSEG_KEY_RE = re.compile(r"^[a-f0-9]{32,}$", re.IGNORECASE)
 
 
 def _login_html(error: str = "") -> str:
-    """Return the Bloomberg-themed login page as a self-contained HTML string."""
+    """Return the liquid-glass login page as a self-contained HTML string."""
     # Inline the North Star SVG (scaled up for the login page)
     star_svg = """
-    <svg width="48" height="48" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+    <svg width="52" height="52" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
       <defs>
-        <radialGradient id="ns_core" cx="50%" cy="50%" r="60%">
-          <stop offset="0%"  stop-color="#ffd60a"/>
-          <stop offset="35%" stop-color="#ffb627"/>
-          <stop offset="80%" stop-color="#fa8c00"/>
-          <stop offset="100%" stop-color="#cc6a00"/>
+        <radialGradient id="ps_core" cx="50%" cy="50%" r="62%">
+          <stop offset="0%"  stop-color="#ffffff"/>
+          <stop offset="42%" stop-color="#dff6ff"/>
+          <stop offset="82%" stop-color="#6ee7ff"/>
+          <stop offset="100%" stop-color="#38b6e0"/>
         </radialGradient>
-        <filter id="ns_glow" x="-50%" y="-50%" width="200%" height="200%">
-          <feGaussianBlur stdDeviation="0.8" result="blur"/>
+        <filter id="ps_glow" x="-60%" y="-60%" width="220%" height="220%">
+          <feGaussianBlur stdDeviation="0.9" result="blur"/>
           <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
         </filter>
       </defs>
-      <g opacity="0.35" stroke="#fa8c00" stroke-width="0.6" stroke-linecap="round">
+      <g opacity="0.4" stroke="#6ee7ff" stroke-width="0.55" stroke-linecap="round">
         <line x1="5" y1="5" x2="9" y2="9"/>
         <line x1="19" y1="5" x2="15" y2="9"/>
         <line x1="5" y1="19" x2="9" y2="15"/>
         <line x1="19" y1="19" x2="15" y2="15"/>
       </g>
       <path d="M12 0 L13.2 10.2 L24 12 L13.2 13.8 L12 24 L10.8 13.8 L0 12 L10.8 10.2 Z"
-            fill="url(#ns_core)" filter="url(#ns_glow)"/>
-      <circle cx="12" cy="12" r="0.9" fill="#fff5d0"/>
+            fill="url(#ps_core)" filter="url(#ps_glow)"/>
+      <circle cx="12" cy="12" r="0.9" fill="#ffffff"/>
     </svg>
     """
 
     error_block = ""
     if error:
         error_block = f"""
-        <div style="
-            color: #ff4444;
-            font-size: 12px;
-            margin-top: 12px;
-            padding: 8px 12px;
-            border: 1px solid #ff4444;
-            border-radius: 4px;
-            background: rgba(255, 68, 68, 0.08);
-        ">{error}</div>
+        <div class="error-box">{error}</div>
         """
 
     # Import config here to get the demo URL
@@ -89,105 +81,185 @@ def _login_html(error: str = "") -> str:
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#04060d">
     <title>Polaris — Connect</title>
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        :root {{
+            --bg: #04060d;
+            --ink: rgba(255,255,255,0.92);
+            --ink-2: rgba(255,255,255,0.56);
+            --ink-3: rgba(255,255,255,0.34);
+            --glass: rgba(255,255,255,0.055);
+            --edge: rgba(255,255,255,0.10);
+            --edge-bright: rgba(255,255,255,0.18);
+            --polar: #6ee7ff;
+            --font: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", sans-serif;
+            --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+        }}
         body {{
-            background: #000;
-            color: #d4d4d4;
-            font-family: 'JetBrains Mono', 'IBM Plex Mono', 'Menlo', 'Consolas', monospace;
+            background: var(--bg);
+            color: var(--ink);
+            font-family: var(--font);
             display: flex;
             justify-content: center;
             align-items: center;
             min-height: 100vh;
+            overflow: hidden;
+            -webkit-font-smoothing: antialiased;
         }}
+        .aurora {{ position: fixed; inset: 0; z-index: -2; overflow: hidden; }}
+        .orb {{ position: absolute; border-radius: 50%; filter: blur(95px); opacity: 0.5; }}
+        .orb-polar {{ width: 58vw; height: 58vw; left: -16vw; top: -22vw;
+            background: radial-gradient(circle at 38% 38%, #38b6e04d, #0e4a6a33 48%, transparent 70%);
+            animation: drift-a 80s ease-in-out infinite alternate; }}
+        .orb-violet {{ width: 48vw; height: 48vw; right: -14vw; bottom: -16vw;
+            background: radial-gradient(circle at 60% 40%, #8b7cff40, #4636a322 52%, transparent 72%);
+            animation: drift-b 95s ease-in-out infinite alternate; }}
+        @keyframes drift-a {{ to {{ transform: translate(8vw, 6vh) scale(1.10); }} }}
+        @keyframes drift-b {{ to {{ transform: translate(-6vw, -8vh) scale(0.93); }} }}
+        .stars {{ position: fixed; inset: -60px; z-index: -1; pointer-events: none;
+            background-image:
+                radial-gradient(1px 1px at 22px 34px, rgba(255,255,255,0.7), transparent),
+                radial-gradient(1px 1px at 168px 92px, rgba(255,255,255,0.4), transparent),
+                radial-gradient(1.4px 1.4px at 308px 142px, rgba(160,230,255,0.6), transparent),
+                radial-gradient(1px 1px at 424px 58px, rgba(255,255,255,0.32), transparent),
+                radial-gradient(1.3px 1.3px at 92px 212px, rgba(255,255,255,0.45), transparent),
+                radial-gradient(1px 1px at 244px 262px, rgba(190,210,255,0.4), transparent);
+            background-size: 470px 310px; background-repeat: repeat;
+            opacity: 0.5; animation: twinkle 8s ease-in-out infinite alternate; }}
+        @keyframes twinkle {{ to {{ opacity: 0.2; }} }}
         .gate {{
-            width: 380px;
-            padding: 48px 36px;
+            width: min(420px, calc(100vw - 32px));
+            padding: 46px 40px 38px;
             text-align: center;
+            border-radius: 28px;
+            background: var(--glass);
+            -webkit-backdrop-filter: blur(24px) saturate(180%);
+            backdrop-filter: blur(24px) saturate(180%);
+            border: 1px solid var(--edge);
+            box-shadow:
+                inset 0 1px 0 var(--edge-bright),
+                inset 0 -1px 0 rgba(255,255,255,0.04),
+                0 24px 60px rgba(0,0,0,0.45);
+            animation: rise .9s cubic-bezier(.2,.7,.2,1) both;
         }}
-        .logo {{ margin-bottom: 16px; }}
+        @keyframes rise {{
+            from {{ opacity: 0; transform: translateY(26px); filter: blur(8px); }}
+        }}
+        @supports not ((backdrop-filter: blur(2px)) or (-webkit-backdrop-filter: blur(2px))) {{
+            .gate {{ background: rgba(18, 22, 34, 0.93); }}
+        }}
+        .logo {{ margin-bottom: 14px; filter: drop-shadow(0 0 16px rgba(110,231,255,0.45)); }}
         .title {{
-            font-size: 28px;
+            font-size: 24px;
             font-weight: 700;
-            color: #fa8c00;
-            letter-spacing: 6px;
-            margin-bottom: 4px;
+            letter-spacing: 0.28em;
+            margin-bottom: 6px;
+            background: linear-gradient(92deg, #ffffff 25%, var(--polar) 80%);
+            -webkit-background-clip: text; background-clip: text;
+            -webkit-text-fill-color: transparent;
         }}
         .subtitle {{
             font-size: 11px;
-            color: #7a7a7a;
-            letter-spacing: 2px;
+            color: var(--ink-3);
+            letter-spacing: 0.22em;
             text-transform: uppercase;
-            margin-bottom: 36px;
+            margin-bottom: 34px;
         }}
-        .input-group {{ margin-bottom: 16px; text-align: left; }}
+        .input-group {{ margin-bottom: 14px; text-align: left; }}
         .input-label {{
-            font-size: 9px;
-            color: #7a7a7a;
-            letter-spacing: 1.5px;
+            font-size: 10px;
+            color: var(--ink-3);
+            letter-spacing: 0.14em;
             text-transform: uppercase;
-            margin-bottom: 6px;
+            font-weight: 600;
+            margin-bottom: 7px;
+            padding-left: 6px;
         }}
         input[type="text"], input[type="password"] {{
             width: 100%;
-            padding: 12px 14px;
-            background: #0a0a0a;
-            border: 1px solid #2a2a2a;
-            border-radius: 4px;
-            color: #d4d4d4;
-            font-family: inherit;
+            padding: 13px 18px;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid var(--edge);
+            border-radius: 999px;
+            color: var(--ink);
+            font-family: var(--mono);
             font-size: 14px;
             outline: none;
-            transition: border-color 0.2s;
+            transition: border-color .25s, background .25s, box-shadow .25s;
         }}
+        input::placeholder {{ color: var(--ink-3); font-family: var(--font); }}
         input:focus {{
-            border-color: #fa8c00;
-        }}
-        input.error {{
-            border-color: #ff4444;
+            border-color: rgba(110,231,255,0.5);
+            background: rgba(255,255,255,0.08);
+            box-shadow: 0 0 0 4px rgba(110,231,255,0.08);
         }}
         .btn {{
             width: 100%;
-            padding: 12px;
-            background: #fa8c00;
-            color: #000;
+            padding: 13px;
+            color: #0b0c12;
+            background: linear-gradient(180deg, #ffffff, #d9dde6);
             border: none;
-            border-radius: 4px;
-            font-family: inherit;
-            font-size: 13px;
+            border-radius: 999px;
+            font-family: var(--font);
+            font-size: 13.5px;
             font-weight: 700;
-            letter-spacing: 2px;
+            letter-spacing: 0.12em;
             cursor: pointer;
-            margin-top: 8px;
-            transition: background 0.2s;
+            margin-top: 10px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.4), inset 0 1px 0 #fff;
+            transition: transform .25s, box-shadow .25s;
         }}
-        .btn:hover {{ background: #ffb627; }}
+        .btn:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 8px 26px rgba(110,231,255,0.22), inset 0 1px 0 #fff;
+        }}
+        .error-box {{
+            color: #ffb4ae;
+            font-size: 12.5px;
+            margin-top: 14px;
+            padding: 10px 16px;
+            border: 1px solid rgba(255,69,58,0.30);
+            border-radius: 14px;
+            background: rgba(255,69,58,0.10);
+        }}
         .toggle-link {{
-            font-size: 11px;
-            color: #7a7a7a;
+            font-size: 12px;
+            color: var(--ink-3);
             cursor: pointer;
-            margin-top: 16px;
+            margin-top: 18px;
             display: inline-block;
+            transition: color .25s;
         }}
-        .toggle-link:hover {{ color: #fa8c00; }}
-        .member-input {{ display: none; margin-top: 16px; }}
+        .toggle-link:hover {{ color: var(--polar); }}
+        .member-input {{ display: none; margin-top: 14px; }}
         .member-input.visible {{ display: block; }}
         .demo-link {{
             display: block;
-            margin-top: 32px;
-            font-size: 11px;
-            color: #555;
+            margin-top: 26px;
+            font-size: 12px;
+            color: var(--ink-3);
             text-decoration: none;
+            transition: color .25s;
         }}
-        .demo-link:hover {{ color: #fa8c00; }}
+        .demo-link:hover {{ color: var(--polar); }}
         .divider {{
-            border-top: 1px solid #1a1a1a;
-            margin: 24px 0 20px;
+            border-top: 1px solid var(--edge);
+            margin: 26px 0 0;
+        }}
+        @media (prefers-reduced-motion: reduce) {{
+            .orb, .stars {{ animation: none !important; }}
+            .gate {{ animation: none; }}
         }}
     </style>
 </head>
 <body>
+    <div class="aurora">
+        <div class="orb orb-polar"></div>
+        <div class="orb orb-violet"></div>
+    </div>
+    <div class="stars"></div>
     <div class="gate">
         <div class="logo">{star_svg}</div>
         <div class="title">POLARIS</div>
