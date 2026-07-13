@@ -31,6 +31,11 @@ class ChainSnapshot:
     spot: float
     timestamp: int
     contracts: list[OptionContract] = field(default_factory=list)
+    # Data provenance: "lseg" | "cboe" (Prometheus backup) | "synthetic" |
+    # "unknown" (e.g. replay pickles from before this field existed).
+    # The dashboard surfaces non-LSEG sources so a LIVE badge can't quietly
+    # mean delayed backup data.
+    source: str = "unknown"
 
 
 class OptionsFeed(Protocol):
@@ -223,6 +228,7 @@ class SyntheticOptionsFeed:
             spot=spot,
             timestamp=int(time.time()),
             contracts=contracts,
+            source="synthetic",
         )
 
 
@@ -337,6 +343,14 @@ class LSEGOptionsFeed:
         self._yf_oi_cache: dict[
             str, tuple[date, dict[tuple[float, str, str], float]]
         ] = {}
+        # Chain-snapshot TTL cache: ticker -> (fetch_ts, snapshot_or_None).
+        # Bounds how often we re-pull full option chains from the shared,
+        # rate-limited Workspace Desktop API gateway (also used by
+        # flow-terminal, MCP servers, the desktop app). Reuse a good pull for
+        # _chain_ttl seconds; stamp failures too so a hung/slow feed backs off
+        # instead of re-hammering a full chain every compute tick.
+        self._snapshot_cache: dict[str, tuple[float, Optional[ChainSnapshot]]] = {}
+        self._chain_ttl = int(os.environ.get("POLARIS_CHAIN_TTL", "45"))
 
     def _ensure_session(self):
         if self._started:
@@ -351,6 +365,44 @@ class LSEGOptionsFeed:
                 f"Could not open LSEG desktop session. "
                 f"Is LSEG Workspace running and signed in? Error: {e}"
             ) from e
+
+    def close_session(self) -> None:
+        """Tear down the LSEG desktop session (best-effort).
+
+        Called by ResilientFeed when the breaker declares LSEG dead. This is
+        the fix for a real thread leak: refinitiv.data keeps an internal OMM
+        streaming/reconnect client alive for an open desktop session, and once
+        Workspace dies that client retries the websocket forever
+        (`[OMMSTREAMING_PRICING_0.0] on_ws_error: Connection refused`), leaking
+        a thread per reconnect. Observed in the wild: 9,216 threads after ~9
+        days with Workspace down, which tripped "RuntimeError: can't start new
+        thread" and wedged the whole dashboard (HTTP handler threads and the
+        CBOE-backup fallback could no longer spawn either).
+
+        Closing the session stops that reconnect loop and lets its threads be
+        reaped. The next half-open probe reopens a fresh session via
+        _ensure_session(), which ALSO fixes the long-standing "session never
+        reopens after a Workspace relaunch" bug the watchdog was written to
+        paper over — Polaris now auto-recovers to LSEG instead of needing a
+        manual restart.
+        """
+        if not self._started and self._rd is None:
+            return
+        try:
+            if self._rd is not None:
+                self._rd.close_session()
+        except Exception as e:
+            print(
+                f"[lseg_feed] close_session best-effort failed: "
+                f"{type(e).__name__}: {e}",
+                flush=True,
+            )
+        finally:
+            self._started = False
+            self._rd = None
+            # Drop cached failure-stamps so the reopened session re-pulls
+            # cleanly instead of inheriting a backed-off cache entry.
+            self._snapshot_cache.clear()
 
     # ────────────────────────────────────────────────────────────────
     # yfinance EOD OI — primary OI source
@@ -680,6 +732,33 @@ class LSEGOptionsFeed:
         raise RuntimeError(f"Could not resolve spot price for {ticker}")
 
     def get_chain_snapshot(self, ticker: str) -> ChainSnapshot:
+        """TTL-cached wrapper around the real LSEG pull.
+
+        Reuses the last successful snapshot for ``ticker`` for up to
+        ``self._chain_ttl`` seconds so the compute loop's cadence doesn't turn
+        into a full option-chain re-pull every tick against the shared gateway.
+        On a fetch failure we still stamp the cache so a hung/slow feed backs
+        off instead of hammering every cycle; compute_loop keeps the last good
+        grid on screen during that window (GEXCache retains it).
+        """
+        now = time.time()
+        cached = self._snapshot_cache.get(ticker)
+        if cached is not None and (now - cached[0]) < self._chain_ttl:
+            if cached[1] is not None:
+                return cached[1]
+            raise RuntimeError(
+                f"{ticker}: chain pull backed off after a recent failure "
+                f"(retry within {self._chain_ttl}s)"
+            )
+        try:
+            snap = self._fetch_chain_snapshot_uncached(ticker)
+        except Exception:
+            self._snapshot_cache[ticker] = (now, None)
+            raise
+        self._snapshot_cache[ticker] = (now, snap)
+        return snap
+
+    def _fetch_chain_snapshot_uncached(self, ticker: str) -> ChainSnapshot:
         self._ensure_session()
 
         spot = self._fetch_spot(ticker)
@@ -878,6 +957,7 @@ class LSEGOptionsFeed:
             spot=spot,
             timestamp=int(time.time()),
             contracts=contracts,
+            source="lseg",
         )
 
     @staticmethod
@@ -895,6 +975,280 @@ class LSEGOptionsFeed:
             return None if f != f else f
         except (TypeError, ValueError):
             return None
+
+
+# ======================================================================
+# Prometheus backup feed — CBOE delayed chains via the Prometheus repo
+# ======================================================================
+
+# Where the Prometheus project lives. Its `prometheus` package is imported
+# directly off disk (it isn't reliably pip-installed for this interpreter).
+PROMETHEUS_DIR = os.environ.get(
+    "POLARIS_PROMETHEUS_DIR",
+    str(Path.home() / "Claude" / "prometheus"),
+)
+
+
+def _import_prometheus_cboe():
+    """Import prometheus.providers.cboe + parse_occ from the repo on disk.
+
+    Raises ImportError with a actionable message if the repo moved or the
+    package layout changed.
+    """
+    import sys as _sys
+    if PROMETHEUS_DIR not in _sys.path:
+        _sys.path.insert(0, PROMETHEUS_DIR)
+    try:
+        from prometheus.providers import cboe as prom_cboe
+        from prometheus.models import parse_occ as prom_parse_occ
+    except ImportError as e:
+        raise ImportError(
+            f"Prometheus package not importable from {PROMETHEUS_DIR} "
+            f"(set POLARIS_PROMETHEUS_DIR if the repo moved): {e}"
+        ) from e
+    return prom_cboe, prom_parse_occ
+
+
+class PrometheusBackupFeed:
+    """
+    $0/mo backup chain source: CBOE delayed quotes via the Prometheus
+    project's provider (the same backbone Prometheus's dashboard and the
+    lseg-options MCP run on).
+
+    One CDN GET per ticker returns the full chain across all expiries with
+    per-contract greeks. We keep CBOE's native gamma + IV verbatim (same
+    policy as Prometheus), compute vanna/color via Black-Scholes from that
+    IV, and take CBOE's open_interest directly — real OI even for 0DTE, so
+    none of the LSEG path's volume calibration is needed.
+
+    Data is ~15-min delayed (CBOE free tier). The snapshot is stamped
+    source="cboe" so the dashboard can disclose that.
+    """
+
+    # SPX convention: Polaris (like Skylit) wants SPXW weeklies only —
+    # CBOE's _SPX.json mixes SPX (AM-settled monthlies) and SPXW roots.
+    _ROOT_OVERRIDES = {"SPX": "SPXW"}
+    # Strike window around spot — slightly wider than the ±3% display trim.
+    _STRIKE_WINDOW_PCT = 0.035
+
+    def __init__(self, ttl_sec: Optional[int] = None):
+        self._cboe, self._parse_occ = _import_prometheus_cboe()
+        # Per-ticker TTL cache: CBOE's delayed feed refreshes ~15-min; the
+        # CDN doesn't need a multi-MB full-chain pull every 15s compute tick.
+        self._ttl = ttl_sec if ttl_sec is not None else int(
+            os.environ.get("POLARIS_CBOE_TTL", "60")
+        )
+        self._cache: dict[str, tuple[float, ChainSnapshot]] = {}
+
+    def get_chain_snapshot(self, ticker: str) -> ChainSnapshot:
+        now = time.time()
+        cached = self._cache.get(ticker)
+        if cached is not None and (now - cached[0]) < self._ttl:
+            return cached[1]
+        raw = self._cboe.fetch_raw(ticker.upper())
+        snap = self._snapshot_from_raw(raw, ticker.upper(), self._parse_occ)
+        self._cache[ticker] = (now, snap)
+        return snap
+
+    @classmethod
+    def _snapshot_from_raw(cls, raw: dict, ticker: str, parse_occ) -> ChainSnapshot:
+        """Map a raw CBOE delayed-quotes payload to a Polaris ChainSnapshot."""
+        data = raw.get("data", {}) or {}
+        spot = data.get("current_price")
+        if not spot or spot <= 0:
+            raise RuntimeError(f"CBOE payload for {ticker} has no current_price")
+        spot = float(spot)
+
+        want_root = cls._ROOT_OVERRIDES.get(ticker, ticker)
+        lo = spot * (1 - cls._STRIKE_WINDOW_PCT)
+        hi = spot * (1 + cls._STRIKE_WINDOW_PCT)
+        today = date.today()
+        expiry_window = set(_next_expiries(N_EXPIRIES))
+
+        contracts: list[OptionContract] = []
+        for o in data.get("options", []) or []:
+            try:
+                root, exp, otype, strike = parse_occ(o.get("option", ""))
+            except ValueError:
+                continue
+            if root != want_root:
+                continue
+            if exp not in expiry_window:
+                continue
+            if not (lo <= strike <= hi):
+                continue
+
+            oi = o.get("open_interest")
+            oi = float(oi) if oi else 0.0
+            if oi <= 0:
+                # Rare with CBOE (OI is real even for 0DTE) — fall back to
+                # today's volume rather than dropping a populated contract.
+                vol = o.get("volume")
+                oi = float(vol) if vol else 0.0
+                if oi <= 0:
+                    continue
+
+            iv = o.get("iv")
+            iv = float(iv) if iv else 0.0
+            if iv > 3:  # defensive percent→decimal, CBOE is already decimal
+                iv = iv / 100
+
+            days_to_expiry = (exp - today).days
+            T = max(days_to_expiry, 0) / 365.0
+            if T == 0:
+                T = 0.5 / 365.0  # 0DTE: half a day keeps BS math sane
+
+            native_gamma = o.get("gamma")
+            native_gamma = float(native_gamma) if native_gamma else 0.0
+            if native_gamma > 0:
+                gamma = native_gamma
+            elif iv > 0:
+                gamma = bs_gamma(spot, strike, T, RISK_FREE_RATE, iv)
+            else:
+                continue  # neither native gamma nor IV — nothing to compute
+
+            # Vanna/color need IV; with native gamma but iv==0 (deep ITM
+            # illiquid), keep the contract for GEX and zero the others.
+            if iv > 0:
+                vanna = bs_vanna(spot, strike, T, RISK_FREE_RATE, iv)
+                color = bs_color(spot, strike, T, RISK_FREE_RATE, iv)
+            else:
+                vanna = 0.0
+                color = 0.0
+
+            sign = blended_dealer_sign(
+                ticker, strike, otype, days_to_expiry=days_to_expiry
+            )
+
+            contracts.append(
+                OptionContract(
+                    strike=strike,
+                    expiry=exp.isoformat(),
+                    option_type=otype,
+                    gamma=gamma,
+                    vanna=vanna,
+                    open_interest=oi,
+                    dealer_sign=sign,
+                    color=color,
+                )
+            )
+
+        if not contracts:
+            raise RuntimeError(
+                f"CBOE chain for {ticker} produced no usable contracts "
+                f"(root={want_root}, window {lo:.0f}-{hi:.0f})"
+            )
+
+        return ChainSnapshot(
+            ticker=ticker,
+            spot=spot,
+            timestamp=int(time.time()),
+            contracts=contracts,
+            source="cboe",
+        )
+
+
+# ======================================================================
+# Resilient feed — LSEG primary, Prometheus/CBOE backup, circuit breaker
+# ======================================================================
+
+class ResilientFeed:
+    """
+    Wraps a primary feed (LSEG) with a backup (Prometheus/CBOE) behind a
+    circuit breaker.
+
+    Why a breaker instead of plain try/except: a dead LSEG session fails
+    SLOWLY (~30-90s of rd.get_data timeouts per ticker), which is exactly
+    the darkness cadence that used to keep the watchdog restart-cycling
+    polaris. After `threshold` consecutive primary failures the breaker
+    OPENS and every ticker is served from the backup immediately for
+    `cooldown` seconds; then ONE half-open probe retries the primary —
+    success closes the breaker (back on LSEG), failure re-opens it.
+
+    Counting is feed-level, not per-ticker: all tickers share one
+    Workspace session, so one ticker's failure predicts the rest.
+    """
+
+    def __init__(
+        self,
+        primary: OptionsFeed,
+        backup: Optional[OptionsFeed],
+        threshold: Optional[int] = None,
+        cooldown: Optional[int] = None,
+        clock=time.time,
+    ):
+        self.primary = primary
+        self.backup = backup
+        self.threshold = threshold if threshold is not None else int(
+            os.environ.get("POLARIS_LSEG_BREAKER_THRESHOLD", "2")
+        )
+        self.cooldown = cooldown if cooldown is not None else int(
+            os.environ.get("POLARIS_LSEG_BREAKER_COOLDOWN", "300")
+        )
+        self._clock = clock
+        self._consecutive_failures = 0
+        self._open_until: float = 0.0   # breaker open while clock() < this
+        self._was_open = False          # for the recovery log line
+
+    # ── breaker state helpers ───────────────────────────────────────
+    def _breaker_open(self) -> bool:
+        return self._clock() < self._open_until
+
+    def _trip(self):
+        self._open_until = self._clock() + self.cooldown
+        self._was_open = True
+        print(
+            f"[resilient_feed] breaker OPEN — serving CBOE backup for "
+            f"{self.cooldown}s before next LSEG probe",
+            flush=True,
+        )
+        # NOTE: we deliberately do NOT close the primary LSEG session here.
+        # Closing forces _ensure_session() to re-open on the next half-open
+        # probe, and refinitiv.data's open_session() has no timeout — against a
+        # dead Workspace the re-open HANGS, freezing the whole compute loop
+        # (observed: data went stale while the process still served HTTP).
+        # Keeping the session open lets the probe fail FAST (connection
+        # refused) and fall straight through to the CBOE backup. The original
+        # streaming thread leak this was meant to stop is slow (~1 thread/84s,
+        # only fatal after ~9 days) and is now caught far earlier by the
+        # watchdog's thread-count backstop (POLARIS_THREAD_LIMIT), which
+        # recycles the process cleanly. close_session() remains available for
+        # manual/explicit teardown but must never be called on the hot path.
+
+    # ── feed protocol ───────────────────────────────────────────────
+    def get_chain_snapshot(self, ticker: str) -> ChainSnapshot:
+        if not self._breaker_open():
+            try:
+                snap = self.primary.get_chain_snapshot(ticker)
+                if self._was_open or self._consecutive_failures:
+                    print(
+                        f"[resilient_feed] LSEG recovered on {ticker} — "
+                        f"breaker reset",
+                        flush=True,
+                    )
+                self._consecutive_failures = 0
+                self._was_open = False
+                return snap
+            except Exception as e:
+                self._consecutive_failures += 1
+                print(
+                    f"[resilient_feed] LSEG failed for {ticker} "
+                    f"({self._consecutive_failures}/{self.threshold}): "
+                    f"{type(e).__name__}: {e}",
+                    flush=True,
+                )
+                if self._consecutive_failures >= self.threshold:
+                    self._trip()
+                # fall through to backup for THIS call either way
+        return self._backup_snapshot(ticker)
+
+    def _backup_snapshot(self, ticker: str) -> ChainSnapshot:
+        if self.backup is None:
+            raise RuntimeError(
+                f"{ticker}: LSEG unavailable and no backup feed configured"
+            )
+        snap = self.backup.get_chain_snapshot(ticker)
+        return snap
 
 
 # ======================================================================
@@ -944,7 +1298,21 @@ def make_feed(mode: str = "synthetic", replay_dir: Optional[Path] = None) -> Opt
     if mode == "synthetic":
         return SyntheticOptionsFeed()
     if mode == "lseg":
-        return LSEGOptionsFeed()
+        # LSEG primary with the Prometheus/CBOE backup behind a breaker.
+        # A broken backup never blocks startup — it degrades to LSEG-only.
+        backup: Optional[OptionsFeed]
+        try:
+            backup = PrometheusBackupFeed()
+            print("[data_feed] CBOE backup feed armed (Prometheus provider)",
+                  flush=True)
+        except Exception as e:
+            backup = None
+            print(
+                f"[data_feed] CBOE backup unavailable — LSEG-only mode "
+                f"({type(e).__name__}: {e})",
+                flush=True,
+            )
+        return ResilientFeed(LSEGOptionsFeed(), backup)
     if mode == "replay":
         if replay_dir is None:
             raise ValueError("replay mode requires replay_dir")

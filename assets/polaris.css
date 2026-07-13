@@ -136,6 +136,10 @@ body {
 .live-dot.stale { background: var(--red); box-shadow: 0 0 10px var(--red); animation: none; }
 .live-dot.offline { background: rgba(255,255,255,0.35); box-shadow: none; animation: none; }
 @keyframes pulse { 50% { opacity: 0.35; } }
+.src-pill { font-size: 11px; font-weight: 700; letter-spacing: 0.04em; white-space: nowrap;
+  color: var(--amber); background: rgba(255, 179, 64, 0.10);
+  border: 1px solid rgba(255, 179, 64, 0.35); border-radius: var(--r-pill);
+  padding: 3px 11px; animation: pulse 2.8s ease-in-out infinite; cursor: help; }
 .nav-link { color: var(--ink-2); text-decoration: none; font-size: 12.5px; font-weight: 600;
   padding: 6px 14px; border-radius: var(--r-pill); border: 1px solid transparent;
   transition: all .25s; }
@@ -235,6 +239,42 @@ body {
 .np-warn { border-color: rgba(255, 179, 64, 0.35); background: rgba(255, 179, 64, 0.07);
   color: var(--amber); animation: pulse 1.8s ease-in-out infinite; }
 
+/* Star Node lifecycle state pill (fresh / charging / held / decaying) */
+.np-life { cursor: help; }
+.np-life-fresh { border-color: rgba(255,179,64,0.42); background: rgba(255,179,64,0.09);
+  animation: pulse 1.8s ease-in-out infinite; }
+.np-life-fresh b { color: var(--amber); }
+.np-life-charge { border-color: rgba(110,231,255,0.36); background: rgba(110,231,255,0.07); }
+.np-life-charge b { color: var(--polar); }
+.np-life-held b { color: var(--ink); }
+.np-life-decay { border-color: rgba(255,255,255,0.12); background: rgba(255,255,255,0.03); opacity: 0.82; }
+.np-life-decay b { color: var(--ink-2); }
+
+/* ---------- reading guide (collapsible) ---------- */
+.guide { padding: 0; }
+.guide .g-sum { list-style: none; cursor: pointer; display: flex; align-items: baseline;
+  gap: 12px; padding: 13px 20px; user-select: none; }
+.guide .g-sum::-webkit-details-marker { display: none; }
+.g-title { font-size: 13px; font-weight: 700; color: var(--ink); letter-spacing: 0.01em; }
+.g-hint { font-size: 11.5px; color: var(--ink-3); font-style: italic; }
+.g-chev { margin-left: auto; color: var(--ink-3); font-size: 11px; transition: transform .3s ease; }
+.guide[open] .g-chev { transform: rotate(180deg); }
+.g-body { padding: 0 20px 18px; }
+.g-cols { display: grid; grid-template-columns: 1fr 1fr 1.25fr; gap: 24px;
+  padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.07); }
+.g-head { font-size: 10px; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--polar); opacity: 0.85; margin: 14px 0 10px; }
+.g-item { margin-bottom: 9px; line-height: 1.42; }
+.g-term { font-family: var(--mono); font-size: 11.5px; font-weight: 700;
+  color: var(--ink); margin-right: 7px; }
+.g-desc { font-size: 12px; color: var(--ink-2); }
+.g-cues { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+.g-cues li { position: relative; padding-left: 17px; font-size: 12px; color: var(--ink-2); line-height: 1.42; }
+.g-cues li::before { content: "→"; position: absolute; left: 0; color: var(--polar); opacity: 0.7; }
+.g-more { display: inline-block; margin-top: 16px; font-size: 12px; font-weight: 600;
+  color: var(--polar); text-decoration: none; border-bottom: 1px solid transparent; transition: border-color .2s; }
+.g-more:hover { border-bottom-color: var(--polar); }
+
 /* ---------- stale banner ---------- */
 .banner { border-radius: var(--r-md); padding: 12px 20px; text-align: center;
   font-size: 13px; font-weight: 600; letter-spacing: 0.04em; }
@@ -249,6 +289,7 @@ body {
   .deck-row { gap: 14px; }
   .seg-scroll { max-width: 100%; }
   .shell { padding-top: 80px; }
+  .g-cols { grid-template-columns: 1fr; gap: 6px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .orb, .stars, .stars-b, .live-dot, .np-warn, .chip-pulse { animation: none !important; }

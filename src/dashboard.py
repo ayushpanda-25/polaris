@@ -306,6 +306,62 @@ def _hoverlabel() -> dict:
     )
 
 
+# ── Adaptive cell-label color ───────────────────────────────────────
+# A go.Heatmap's textfont.color takes only ONE color in Plotly 6.x (a 2D
+# array is rejected on validation), and near-white labels wash out on the
+# bright tiles of the lighter palettes (Solar amber, the cyan/emerald
+# positive ends). So we render the dollar labels ourselves as annotations,
+# choosing dark ink on bright tiles and starlight on faint ones — readable
+# contrast on every palette. (Vijay: "white text on some styles is hard to
+# read.")
+_TEXT_DARK = "#0a1420"
+_TEXT_LIGHT = "rgba(234,242,255,0.95)"
+
+
+def _luminance(hex_color: str) -> float:
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+
+
+def _label_color(v: float, vmax: float, pos_lum: float, neg_lum: float) -> str:
+    """Dark ink once the displayed tile is light enough to wash out white
+    text. A cell's tile ≈ the palette's pos/neg endpoint at an intensity
+    ∝ |v|/vmax over the near-black board, so its effective luminance ≈
+    endpoint_luminance × intensity; crossing ~0.5 flips to dark ink."""
+    intensity = min(abs(v) / vmax, 1.0) if vmax > 0 else 0.0
+    eff = (pos_lum if v > 0 else neg_lum) * intensity
+    return _TEXT_DARK if eff >= 0.5 else _TEXT_LIGHT
+
+
+def _add_cell_labels(fig, text_grid, z_color, vmax, x_labels, y_labels,
+                     pal, size=10.5, row=None, col=None) -> None:
+    """Place per-cell dollar labels as annotations with adaptive contrast.
+    Skips empty cells so genuinely-blank tiles stay bare glass. Annotations
+    are clipped to the plot area, so they behave under zoom (item #4)."""
+    pos_lum, neg_lum = _luminance(pal["pos"]), _luminance(pal["neg"])
+    extra = dict(row=row, col=col) if row is not None else {}
+    for i in range(len(y_labels)):
+        for j in range(len(x_labels)):
+            txt = text_grid[i][j]
+            if not txt:
+                continue
+            # Place by integer category INDEX (j, i), not the label string:
+            # on a category axis Plotly parses a numeric-looking coordinate
+            # string ("572") as the value 572, which lands far outside the
+            # range (label clipped) and also drags the autorange. Indices map
+            # straight to category positions — the same trick the spot line
+            # and Star Node brackets already use.
+            fig.add_annotation(
+                x=j, y=i, text=txt, showarrow=False,
+                font=dict(
+                    family=MONO, size=size,
+                    color=_label_color(z_color[i, j], vmax, pos_lum, neg_lum),
+                ),
+                **extra,
+            )
+
+
 def _empty_figure(message: str = "PRIMING CACHE — first data in ~15s") -> go.Figure:
     fig = go.Figure()
     fig.add_annotation(
@@ -403,14 +459,15 @@ def _build_heatmap_figure(
             f"{mode_label.upper()}    $%{{customdata:,.1f}}K"
             "<extra></extra>"
         ),
-        text=text_grid,
-        texttemplate="%{text}",
-        textfont=dict(size=10.5, color="rgba(234,242,255,0.92)", family=MONO),
         xgap=2.5,
         ygap=2.5,
     )
 
     fig = go.Figure(data=[heat])
+
+    # Cell labels as adaptive-contrast annotations (see _add_cell_labels).
+    _add_cell_labels(fig, text_grid, z_color, vmax,
+                     expiry_labels, strike_labels, pal, size=10.5)
 
     # Star Node marker — glowing bracketed corners (viewfinder reticle)
     if nodes and nodes.sirius is not None:
@@ -492,6 +549,11 @@ def _build_heatmap_figure(
         ),
         height=660,
         margin=dict(l=64, r=86, t=44, b=16),
+        # Persist the viewer's zoom/pan across the 5s poll refresh. Keyed to
+        # ticker so switching instrument resets the view, but a refresh of the
+        # SAME ticker keeps you zoomed in (Vijay: "every refresh zooms me
+        # out"). Mode/palette changes keep the zoom — same axes.
+        uirevision=grid.ticker,
     )
     return fig
 
@@ -560,13 +622,16 @@ def _build_orion_figure(cache, mode: str = "gex", palette: str = DEFAULT_PALETTE
                     if idx == 3 else None
                 ),
                 xgap=2, ygap=2,
-                text=text_grid,
-                texttemplate="%{text}",
-                textfont=dict(size=8.5, color="rgba(234,242,255,0.92)", family=MONO),
                 hovertemplate=f"{tkr}<br>Strike %{{y}}<br>Expiry %{{x}}<br>{MODE_LABELS.get(mode, mode.upper())} $%{{customdata:.0f}}k<extra></extra>",
             ),
             row=1, col=idx,
         )
+        # Adaptive-contrast cell labels for this subplot (added AFTER the
+        # subplot-title annotations so the title-styling loop below can skip
+        # them by text).
+        _add_cell_labels(fig, text_grid, z_color, vmax,
+                         exp_labels, strike_labels, pal, size=8.5,
+                         row=1, col=idx)
         if nodes and nodes.sirius is not None:
             kx = _orion_format_exp(nodes.sirius.expiry)
             ky = f"{nodes.sirius.strike:g}"
@@ -595,11 +660,16 @@ def _build_orion_figure(cache, mode: str = "gex", palette: str = DEFAULT_PALETTE
         ),
         # Extra top margin so subplot titles + x-axis labels don't collide
         margin=dict(l=50, r=70, t=96, b=20),
+        # Preserve zoom/pan across the poll refresh (item #4).
+        uirevision="ORION",
     )
     # Tone subplot titles AND push them above the x-axis tick labels.
     # subplot_titles default to y≈1.0 which collides with side='top' x-ticks;
-    # bumping y to >1.0 puts them in the top margin.
-    for i, ann in enumerate(fig.layout.annotations):
+    # bumping y to >1.0 puts them in the top margin. Filter by text so the
+    # per-cell label annotations added above are left untouched.
+    for ann in fig.layout.annotations:
+        if ann.text not in orion_tickers:
+            continue
         ann.font = dict(family=FONT, size=13.5, color=INK, weight=700)
         ann.y = 1.08   # above the plot area, in the top margin
         ann.yanchor = "bottom"
@@ -621,6 +691,131 @@ def _build_orion_figure(cache, mode: str = "gex", palette: str = DEFAULT_PALETTE
 
 # api/index.py (Vercel demo entry) still imports the pre-rename symbol.
 _build_trinity_figure = _build_orion_figure
+
+
+# ── Star Node lifecycle (freshness) ─────────────────────────────────
+_LIFECYCLE_META = {
+    "fresh":  ("Fresh",   "Star Node just moved here — unproven. Wait for it "
+                          "to hold a few cycles before trusting the level."),
+    "charge": ("Charging","∂Γ/∂t is positive — gamma is still building at this "
+                          "strike, so the magnet is strengthening into expiry."),
+    "held":   ("Held",    "Established Star Node — gamma stable here. A proven, "
+                          "settled magnet."),
+    "decay":  ("Decaying","∂Γ/∂t has flipped against it — gamma is rolling off, "
+                          "so this magnet is weakening and its pull should fade."),
+}
+
+
+def _node_lifecycle(nodes, grid, reshuffle_age):
+    """Classify the Star Node's lifecycle from data Polaris already has:
+    how long it has held its strike (reshuffle age) and its ∂Γ/∂t (whether
+    |gamma| at that cell is still building or rolling off). Directly answers
+    Vijay's "can ΔΓ/Δt flag fresh→…→decaying?" — yes.
+
+    Returns (state_key, label, tooltip) or None. NOTE: Skylit's TESTED /
+    DELIVERED stages need spot-vs-node *touch* history, which Polaris doesn't
+    track yet — that's the documented follow-up; this covers the ∂Γ/∂t-derived
+    stages (fresh / charging / held / decaying)."""
+    if not (nodes and nodes.sirius and nodes.sirius.significant):
+        return None
+    star = nodes.sirius
+    # Fresh: the Star Node strike just changed — unproven.
+    if reshuffle_age is not None and reshuffle_age < 120:
+        return ("fresh",) + _LIFECYCLE_META["fresh"]
+    # ∂Γ/∂t at the Star Node's own cell.
+    color_v = 0.0
+    if grid:
+        for c in grid.cells:
+            if c.strike == star.strike and c.expiry == star.expiry:
+                color_v = c.color_value
+                break
+    # Is |GEX| growing or shrinking? d|GEX|/dt = sign(GEX) · ∂Γ/∂t. Threshold
+    # relative to the node's own size so we don't flag noise as a trend.
+    signed = color_v if star.value >= 0 else -color_v
+    thresh = max(abs(star.value) * 0.04, 1.0)
+    if signed >= thresh:
+        return ("charge",) + _LIFECYCLE_META["charge"]
+    if signed <= -thresh:
+        return ("decay",) + _LIFECYCLE_META["decay"]
+    return ("held",) + _LIFECYCLE_META["held"]
+
+
+# ── In-terminal reading guide ───────────────────────────────────────
+def _reading_guide():
+    """Collapsible legend + 'what to look for' cues, right on the board.
+    Simple by design; the deep dive lives in Academy (/learn). Vijay: 'a
+    short instruction on how to read some of these maps has to be in
+    polaris … simple explanations with deep dives in academy would be
+    ideal.'"""
+    def item(term, desc):
+        return html.Div(className="g-item", children=[
+            html.Span(term, className="g-term"),
+            html.Span(desc, className="g-desc"),
+        ])
+    return html.Details(
+        className="guide panel glass reveal",
+        style={"--d": "0.12s"},
+        children=[
+            html.Summary(className="g-sum", children=[
+                html.Span("How to read this map", className="g-title"),
+                html.Span("legend + what to look for", className="g-hint"),
+                html.Span("▾", className="g-chev"),
+            ]),
+            html.Div(className="g-body", children=[
+                html.Div(className="g-cols", children=[
+                    html.Div(className="g-col", children=[
+                        html.Div("THE MAP", className="g-head"),
+                        item("Grid", "Strikes stack vertically; expiries run "
+                                     "left → right, nearest first."),
+                        item("Color", "Brightness = how much dealer gamma sits "
+                                      "there. One side pins price, the other "
+                                      "repels it — the palette legends the two "
+                                      "directions."),
+                        item("★ Star Node", "The bracketed cell: the single "
+                                            "strongest magnet. Price tends to "
+                                            "gravitate here by expiry."),
+                        item("Spot line", "The dotted white line is where price "
+                                          "is right now. Read the walls above "
+                                          "vs below it."),
+                    ]),
+                    html.Div(className="g-col", children=[
+                        html.Div("THE VIEWS", className="g-head"),
+                        item("GEX", "Raw dealer gamma — the magnets, as they "
+                                    "are."),
+                        item("GEX·√T", "Evens out 0DTE dominance so longer-dated "
+                                       "structure shows. Use it in the morning."),
+                        item("VEX", "Vanna — vol-driven hedging. Confirms GEX on "
+                                    "trend days, fights it on chop."),
+                        item("ΔΓ/Δt", "Rate of change — which strikes are "
+                                      "charging UP into the close. A quiet "
+                                      "strike lighting up here is turning "
+                                      "magnetic."),
+                    ]),
+                    html.Div(className="g-col g-col-wide", children=[
+                        html.Div("WHAT TO LOOK FOR", className="g-head"),
+                        html.Ul(className="g-cues", children=[
+                            html.Li("Bright same-side walls just above AND below "
+                                    "spot → price boxed in; expect a pinned, "
+                                    "range-bound day."),
+                            html.Li("Star Node sitting away from spot with a "
+                                    "clear path → a magnet pulling price toward "
+                                    "it."),
+                            html.Li("A sign flip right at spot → the "
+                                    "acceleration zone; momentum tends to run "
+                                    "if price breaks through."),
+                            html.Li("ΔΓ/Δt lighting up a strike that was quiet → "
+                                    "it's turning magnetic into the close. "
+                                    "Watch it."),
+                            html.Li("A 'Fresh' Star Node state → it just moved. "
+                                    "Don't trust the new level until it holds."),
+                        ]),
+                    ]),
+                ]),
+                html.A("Full deep dive → Academy", href="/learn",
+                       target="_blank", className="g-more"),
+            ]),
+        ],
+    )
 
 
 # --------------- App layout ---------------
@@ -793,6 +988,9 @@ def create_app(cache, tickers: list[str]) -> Dash:
                         ],
                     ),
 
+                    # How-to-read guide (collapsible; deep dive → /learn)
+                    _reading_guide(),
+
                     # Stat chips
                     html.Div(
                         id="header-cells",
@@ -835,17 +1033,27 @@ def create_app(cache, tickers: list[str]) -> Dash:
         FreshnessState.OFFLINE: "live-dot offline",
     }
 
-    def _build_freshness_badge(status):
-        """Pulsing dot + state + age, in the floating nav."""
+    def _build_freshness_badge(status, source=None):
+        """Pulsing dot + state + age, in the floating nav — plus an explicit
+        disclosure pill whenever data is coming from the CBOE backup, so a
+        LIVE badge can't quietly mean delayed backup data."""
         age = ""
         if status.age_seconds is not None:
             age = status.message.split("updated ")[-1].split(" — ")[0] \
                 if "updated" in status.message else ""
-        return [
+        badge = [
             html.Span(className=_DOT_CLASS[status.state]),
             html.Span(status.label.title(), style={"fontWeight": 600, "color": status.color}),
             html.Span(age, className="age"),
         ]
+        if source == "cboe":
+            badge.append(html.Span(
+                "CBOE backup · 15m delayed",
+                className="src-pill",
+                title=("LSEG is unreachable — serving delayed CBOE chains "
+                       "via Prometheus. Recovers automatically."),
+            ))
+        return badge
 
     def _build_stale_banner(status):
         """Full-width glass stripe for STALE / OFFLINE states."""
@@ -941,6 +1149,18 @@ def create_app(cache, tickers: list[str]) -> Dash:
                     className="np np-warn",
                     children=f"⚠ Reshuffled {int(reshuffle_age)}s ago",
                 ))
+            # Lifecycle state (fresh / charging / held / decaying) from ∂Γ/∂t.
+            life = _node_lifecycle(nodes, grid, reshuffle_age)
+            if life:
+                state_key, state_label, state_tip = life
+                parts.append(html.Span(
+                    className=f"np np-life np-life-{state_key}",
+                    title=state_tip,
+                    children=[
+                        html.Span("State", className="np-label"),
+                        html.B(state_label),
+                    ],
+                ))
         if nodes and nodes.gatekeepers and (not nodes.sirius or nodes.sirius.significant):
             gk_children = [html.Span("Gatekeepers", className="np-label")]
             for g in nodes.gatekeepers[:3]:
@@ -989,7 +1209,6 @@ def create_app(cache, tickers: list[str]) -> Dash:
     def _update(_n, ticker, mode, palette):
         latest_ts = latest_cache_timestamp(cache)
         status = evaluate_freshness(latest_ts)
-        badge = _build_freshness_badge(status)
         banner = _build_stale_banner(status)
         blurb = MODE_BLURBS.get(mode, "")
 
@@ -1001,6 +1220,7 @@ def create_app(cache, tickers: list[str]) -> Dash:
                 nodes = cache.get_nodes(t)
                 if grid is not None:
                     break
+            badge = _build_freshness_badge(status, cache.get_source(t))
             reshuffle_age = cache.sirius_reshuffle_age(t) if grid else None
             header = _build_header_cells(grid, nodes, reshuffle_age, palette)
             node_row = _build_node_row(grid, nodes, mode, "ORION",
@@ -1009,6 +1229,7 @@ def create_app(cache, tickers: list[str]) -> Dash:
 
         grid = cache.get_grid(ticker)
         nodes = cache.get_nodes(ticker)
+        badge = _build_freshness_badge(status, cache.get_source(ticker))
         reshuffle_age = cache.sirius_reshuffle_age(ticker)
         fig = _build_heatmap_figure(grid, nodes, mode, palette)
         header = _build_header_cells(grid, nodes, reshuffle_age, palette)

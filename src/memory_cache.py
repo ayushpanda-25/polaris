@@ -25,12 +25,22 @@ class GEXCache:
     def __init__(self):
         self._grids: dict[str, GEXGrid] = {}
         self._nodes: dict[str, NodeMap] = {}
+        # ticker → data source of the last update ("lseg" | "cboe" | ...)
+        self._sources: dict[str, str] = {}
         # ticker → (last_sirius_strike, last_sirius_expiry, ts_of_last_change)
         self._sirius_history: dict[str, tuple[float, str, float]] = {}
         self._lock = threading.RLock()
 
-    def update(self, ticker: str, grid: GEXGrid, nodes: NodeMap) -> None:
+    def update(
+        self,
+        ticker: str,
+        grid: GEXGrid,
+        nodes: NodeMap,
+        source: Optional[str] = None,
+    ) -> None:
         with self._lock:
+            if source is not None:
+                self._sources[ticker] = source
             # Reshuffle detection: compare new Sirius to last recorded Sirius
             new_sirius = nodes.sirius
             if new_sirius is not None:
@@ -56,6 +66,11 @@ class GEXCache:
     def get_nodes(self, ticker: str) -> Optional[NodeMap]:
         with self._lock:
             return self._nodes.get(ticker)
+
+    def get_source(self, ticker: str) -> Optional[str]:
+        """Data source of the last update for `ticker` ("lseg"/"cboe"/...)."""
+        with self._lock:
+            return self._sources.get(ticker)
 
     def sirius_reshuffle_age(self, ticker: str) -> Optional[float]:
         """

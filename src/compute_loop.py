@@ -48,7 +48,10 @@ class ComputeLoop(threading.Thread):
                     timestamp=snap.timestamp,
                 )
                 nodes = classify_nodes(grid)
-                self.cache.update(ticker, grid, nodes)
+                self.cache.update(
+                    ticker, grid, nodes,
+                    source=getattr(snap, "source", None),
+                )
             except Exception as e:
                 print(f"[compute_loop] {ticker} failed: {e}")
 
