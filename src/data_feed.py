@@ -1165,7 +1165,7 @@ class PrometheusBackupFeed:
         if not contracts:
             raise RuntimeError(
                 f"CBOE chain for {ticker} produced no usable contracts "
-                f"(root={want_root}, window {lo:.0f}-{hi:.0f})"
+                f"(roots={sorted(accept_roots)}, window {lo:.0f}-{hi:.0f})"
             )
 
         return ChainSnapshot(
