@@ -336,30 +336,43 @@ def _label_color(v: float, vmax: float, pos_lum: float, neg_lum: float) -> str:
 
 def _add_cell_labels(fig, text_grid, z_color, vmax, x_labels, y_labels,
                      pal, size=10.5, row=None, col=None) -> None:
-    """Place per-cell dollar labels as annotations with adaptive contrast.
-    Skips empty cells so genuinely-blank tiles stay bare glass. Annotations
-    are clipped to the plot area, so they behave under zoom (item #4)."""
+    """Render per-cell dollar labels as ONE scatter-text trace with per-point
+    adaptive contrast — dark ink on bright tiles, starlight on faint ones.
+
+    Why a single trace and not annotations: a full board is ~276 cells (ORION
+    ~680), and re-drawing that many layout annotations on every 5s poll lags
+    the whole site (it's what made ORION crawl). A single Scatter(mode="text")
+    is batch-rendered — Scatter's textfont.color takes a per-point array
+    (heatmap's does not), so we keep the adaptive coloring for free.
+
+    Positions use the category LABEL strings (x_labels[j], y_labels[i]) — a
+    scatter trace matches its x/y against the axis's category NAMES, so the
+    labels must be the same strings the heatmap defined. (Passing integer
+    indices here instead makes Plotly append "0","1",… as brand-new columns —
+    the opposite of how annotations behave, which take the index.) cliponaxis
+    keeps labels inside the plot under zoom."""
     pos_lum, neg_lum = _luminance(pal["pos"]), _luminance(pal["neg"])
-    extra = dict(row=row, col=col) if row is not None else {}
+    xs, ys, texts, colors = [], [], [], []
     for i in range(len(y_labels)):
         for j in range(len(x_labels)):
             txt = text_grid[i][j]
             if not txt:
                 continue
-            # Place by integer category INDEX (j, i), not the label string:
-            # on a category axis Plotly parses a numeric-looking coordinate
-            # string ("572") as the value 572, which lands far outside the
-            # range (label clipped) and also drags the autorange. Indices map
-            # straight to category positions — the same trick the spot line
-            # and Star Node brackets already use.
-            fig.add_annotation(
-                x=j, y=i, text=txt, showarrow=False,
-                font=dict(
-                    family=MONO, size=size,
-                    color=_label_color(z_color[i, j], vmax, pos_lum, neg_lum),
-                ),
-                **extra,
-            )
+            xs.append(x_labels[j])
+            ys.append(y_labels[i])
+            texts.append(txt)
+            colors.append(_label_color(z_color[i, j], vmax, pos_lum, neg_lum))
+    if not xs:
+        return
+    extra = dict(row=row, col=col) if row is not None else {}
+    fig.add_trace(
+        go.Scatter(
+            x=xs, y=ys, mode="text", text=texts,
+            textfont=dict(family=MONO, size=size, color=colors),
+            hoverinfo="skip", showlegend=False, cliponaxis=True,
+        ),
+        **extra,
+    )
 
 
 def _empty_figure(message: str = "PRIMING CACHE — first data in ~15s") -> go.Figure:

@@ -16,7 +16,9 @@ INDEX_TICKERS = {"SPX"}  # Use SPXW weeklies
 # Refresh cadences (seconds)
 COMPUTE_INTERVAL = 15     # Recompute GEX from cache
 DB_FLUSH_INTERVAL = 60    # Async writer flushes cache → SQLite
-DASHBOARD_POLL = 5        # Dash polls memory cache
+DASHBOARD_POLL = 15       # Dash polls memory cache (matches COMPUTE_INTERVAL —
+                          # polling faster just re-renders identical data and
+                          # lags the board; control changes are instant regardless)
 
 # Sign imputation layer config
 OVERWRITING_WHITELIST = {"AAPL", "NVDA", "MSFT", "TSLA"}
