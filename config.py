@@ -8,7 +8,7 @@ DB_PATH = DATA_DIR / "gex.db"
 
 # Ticker universe (v1)
 TICKERS = [
-    "SPY", "SPX", "QQQ",
+    "SPY", "SPX", "QQQ", "VIX",
     "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA",
 ]
 INDEX_TICKERS = {"SPX"}  # Use SPXW weeklies

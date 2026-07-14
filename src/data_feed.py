@@ -156,6 +156,7 @@ SYNTHETIC_SPOTS = {
     "META": 590.0,
     "NVDA": 140.0,
     "TSLA": 346.0,
+    "VIX": 17.0,
 }
 
 
@@ -1031,6 +1032,16 @@ class PrometheusBackupFeed:
     # Strike window around spot — slightly wider than the ±3% display trim.
     _STRIKE_WINDOW_PCT = 0.035
 
+    # VIX is its own animal: the crash signal is the FAR-OTM call walls (where
+    # crash hedges concentrate — 30/40/50/60+ on a ~17 spot), and it expires
+    # weekly/monthly, not every weekday. So VIX takes both roots (VIX monthly +
+    # VIXW weekly), a wide upward strike window, and an expiry window built from
+    # the expiries actually present in the chain rather than the next-weekdays
+    # heuristic the equity path uses.
+    _VIX_ROOTS = {"VIX", "VIXW"}
+    _VIX_STRIKE_FLOOR_MULT = 0.70   # lo = max(spot*0.70, 10)
+    _VIX_STRIKE_CEIL_MULT = 3.5     # hi = spot*3.5  (~60 on a 17 spot)
+
     def __init__(self, ttl_sec: Optional[int] = None):
         self._cboe, self._parse_occ = _import_prometheus_cboe()
         # Per-ticker TTL cache: CBOE's delayed feed refreshes ~15-min; the
@@ -1059,19 +1070,37 @@ class PrometheusBackupFeed:
             raise RuntimeError(f"CBOE payload for {ticker} has no current_price")
         spot = float(spot)
 
-        want_root = cls._ROOT_OVERRIDES.get(ticker, ticker)
-        lo = spot * (1 - cls._STRIKE_WINDOW_PCT)
-        hi = spot * (1 + cls._STRIKE_WINDOW_PCT)
         today = date.today()
-        expiry_window = set(_next_expiries(N_EXPIRIES))
+        options = data.get("options", []) or []
+
+        if ticker == "VIX":
+            accept_roots = cls._VIX_ROOTS
+            lo = max(spot * cls._VIX_STRIKE_FLOOR_MULT, 10.0)
+            hi = spot * cls._VIX_STRIKE_CEIL_MULT
+            # Expiry window = the nearest N expiries actually in the chain
+            # (VIX expires weekly/monthly, not every weekday).
+            vix_exps: set = set()
+            for o in options:
+                try:
+                    r, e, _t, _s = parse_occ(o.get("option", ""))
+                except ValueError:
+                    continue
+                if r in accept_roots and e >= today:
+                    vix_exps.add(e)
+            expiry_window = set(sorted(vix_exps)[:N_EXPIRIES])
+        else:
+            accept_roots = {cls._ROOT_OVERRIDES.get(ticker, ticker)}
+            lo = spot * (1 - cls._STRIKE_WINDOW_PCT)
+            hi = spot * (1 + cls._STRIKE_WINDOW_PCT)
+            expiry_window = set(_next_expiries(N_EXPIRIES))
 
         contracts: list[OptionContract] = []
-        for o in data.get("options", []) or []:
+        for o in options:
             try:
                 root, exp, otype, strike = parse_occ(o.get("option", ""))
             except ValueError:
                 continue
-            if root != want_root:
+            if root not in accept_roots:
                 continue
             if exp not in expiry_window:
                 continue

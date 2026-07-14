@@ -406,13 +406,16 @@ def _build_heatmap_figure(
 
     mat, strikes, expiries = grid.as_matrix(mode)
 
-    # Trim to ±3% window around spot for readability
+    # Trim to ±3% window around spot for readability. VIX is exempt: its
+    # feed already applies the wide upward window (spot→~3.5×) that captures
+    # the far-OTM crash-hedge call walls — a ±3% trim would gut it.
     spot = grid.spot
-    lo, hi = spot * 0.97, spot * 1.03
-    keep_strikes = [i for i, s in enumerate(strikes) if lo <= s <= hi]
-    if keep_strikes:
-        strikes = [strikes[i] for i in keep_strikes]
-        mat = mat[keep_strikes, :]
+    if grid.ticker != "VIX":
+        lo, hi = spot * 0.97, spot * 1.03
+        keep_strikes = [i for i, s in enumerate(strikes) if lo <= s <= hi]
+        if keep_strikes:
+            strikes = [strikes[i] for i in keep_strikes]
+            mat = mat[keep_strikes, :]
 
     # Limit to first 6 expiries for readability (Skylit shows 5)
     if len(expiries) > 6:
@@ -575,12 +578,12 @@ def _build_orion_figure(cache, mode: str = "gex", palette: str = DEFAULT_PALETTE
     from plotly.subplots import make_subplots
 
     pal = _palette(palette)
-    orion_tickers = ["SPY", "SPX", "QQQ"]
+    orion_tickers = ["SPY", "SPX", "QQQ", "NVDA", "VIX"]
     fig = make_subplots(
         rows=1,
-        cols=3,
+        cols=len(orion_tickers),
         subplot_titles=orion_tickers,
-        horizontal_spacing=0.06,
+        horizontal_spacing=0.028,
     )
 
     def _orion_format_exp(e: str) -> str:
@@ -596,18 +599,20 @@ def _build_orion_figure(cache, mode: str = "gex", palette: str = DEFAULT_PALETTE
             continue
         mat, strikes, expiries = grid.as_matrix(mode)
 
-        # Trim ±3% strike window
+        # Trim ±3% strike window (VIX exempt — its feed already windows wide
+        # for the far-OTM crash-hedge call walls).
         spot = grid.spot
-        lo, hi = spot * 0.97, spot * 1.03
-        keep = [i for i, s in enumerate(strikes) if lo <= s <= hi]
-        if keep:
-            strikes = [strikes[i] for i in keep]
-            mat = mat[keep, :]
+        if tkr != "VIX":
+            lo, hi = spot * 0.97, spot * 1.03
+            keep = [i for i, s in enumerate(strikes) if lo <= s <= hi]
+            if keep:
+                strikes = [strikes[i] for i in keep]
+                mat = mat[keep, :]
 
-        # Limit to first 5 expiries
-        if len(expiries) > 5:
-            expiries = expiries[:5]
-            mat = mat[:, :5]
+        # Limit expiries — 5 panels are narrow, keep the front 4
+        if len(expiries) > 4:
+            expiries = expiries[:4]
+            mat = mat[:, :4]
 
         exp_labels = [_orion_format_exp(e) for e in expiries]
         strike_labels = [f"{s:g}" for s in strikes]
@@ -643,7 +648,7 @@ def _build_orion_figure(cache, mode: str = "gex", palette: str = DEFAULT_PALETTE
         # subplot-title annotations so the title-styling loop below can skip
         # them by text).
         _add_cell_labels(fig, text_grid, z_color, vmax,
-                         exp_labels, strike_labels, pal, size=8.5,
+                         exp_labels, strike_labels, pal, size=7,
                          row=1, col=idx)
         if nodes and nodes.sirius is not None:
             kx = _orion_format_exp(nodes.sirius.expiry)
@@ -683,19 +688,19 @@ def _build_orion_figure(cache, mode: str = "gex", palette: str = DEFAULT_PALETTE
     for ann in fig.layout.annotations:
         if ann.text not in orion_tickers:
             continue
-        ann.font = dict(family=FONT, size=13.5, color=INK, weight=700)
-        ann.y = 1.08   # above the plot area, in the top margin
+        ann.font = dict(family=FONT, size=12, color=INK, weight=700)
+        ann.y = 1.06   # above the plot area, in the top margin
         ann.yanchor = "bottom"
-    for i in range(1, 4):
+    for i in range(1, len(orion_tickers) + 1):
         fig.update_xaxes(
             type="category", side="top",
-            tickfont=dict(size=10, color=INK_2, family=FONT),
+            tickfont=dict(size=8.5, color=INK_2, family=FONT),
             showgrid=False, showline=False,
             row=1, col=i,
         )
         fig.update_yaxes(
             type="category", autorange="reversed",
-            tickfont=dict(size=9.5, color=INK_2, family=MONO),
+            tickfont=dict(size=8, color=INK_2, family=MONO),
             showgrid=False, showline=False,
             row=1, col=i,
         )
@@ -1228,7 +1233,7 @@ def create_app(cache, tickers: list[str]) -> Dash:
         if ticker == "ORION":
             fig = _build_orion_figure(cache, mode, palette)
             # Use first available ticker for header info in Orion mode
-            for t in ("SPY", "SPX", "QQQ"):
+            for t in ("SPY", "SPX", "QQQ", "NVDA", "VIX"):
                 grid = cache.get_grid(t)
                 nodes = cache.get_nodes(t)
                 if grid is not None:
