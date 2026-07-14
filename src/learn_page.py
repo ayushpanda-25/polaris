@@ -7,9 +7,7 @@ map-reading patterns, the ΔΓ/Δt + freshness deep dives, and the
 map→trigger→filter→manage flow.
 
 Terminology is Polaris's own — taught by SIGN (positive node / negative
-node), never by palette color, because palettes are user-switchable. The
-underlying map-reading method draws on Talon's (Glitch) public work; the
-Polaris translation and simplifications are ours.
+node), never by palette color, because palettes are user-switchable.
 
 Served as a self-contained static HTML route (no external CSS/JS) off the
 underlying Flask server — both the local Dash app and the Vercel entry.
@@ -549,10 +547,6 @@ the levels       AT a level only     3× the risk?      the node stack</div>
 </section>
 
 <div class="footer">
-  <p class="credit">The map-reading method here draws on <span class="key">Talon's (Glitch)</span> public
-  work; the Polaris translation and simplifications are ours. Talon says "King node / Pika / Barney" —
-  Polaris says <span class="pos">Star Node</span> / <span class="pos">positive node</span> /
-  <span class="neg">negative node</span>. Learn Polaris's words; the tool is what you'll be reading.</p>
   <p><span class="warn">Not financial advice.</span> This teaches how to read the tool. Nothing here is a
   recommendation to buy or sell anything. Polaris · the fixed pin in the sky.</p>
 </div>
