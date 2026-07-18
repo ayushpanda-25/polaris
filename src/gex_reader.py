@@ -33,13 +33,18 @@ def get_latest_sirius(ticker: str, db_path: Path = _DEFAULT_DB) -> Optional[Siri
     """Return the most recent Sirius node logged for the given ticker."""
     if not Path(db_path).exists():
         return None
-    with sqlite3.connect(db_path) as conn:
+    # `with sqlite3.connect()` commits/rolls back but does NOT close the fd —
+    # explicit close, same lesson as polaris_watchdog.data_age_seconds().
+    conn = sqlite3.connect(db_path)
+    try:
         cur = conn.execute(
             "SELECT ts, ticker, strike, expiry, gex_value "
             "FROM sirius_nodes WHERE ticker = ? ORDER BY ts DESC LIMIT 1",
             (ticker,),
         )
         row = cur.fetchone()
+    finally:
+        conn.close()
     if not row:
         return None
     return SiriusRow(*row)
@@ -49,7 +54,8 @@ def get_latest_grid(ticker: str, db_path: Path = _DEFAULT_DB) -> list[tuple]:
     """Returns list of (strike, expiry, gex_value, vex_value) for most recent ts."""
     if not Path(db_path).exists():
         return []
-    with sqlite3.connect(db_path) as conn:
+    conn = sqlite3.connect(db_path)
+    try:
         ts_row = conn.execute(
             "SELECT MAX(ts) FROM gex_snapshots WHERE ticker = ?", (ticker,)
         ).fetchone()
@@ -61,3 +67,5 @@ def get_latest_grid(ticker: str, db_path: Path = _DEFAULT_DB) -> list[tuple]:
             "WHERE ticker = ? AND ts = ? ORDER BY strike, expiry",
             (ticker, ts),
         ).fetchall()
+    finally:
+        conn.close()

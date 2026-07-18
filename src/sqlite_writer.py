@@ -65,10 +65,15 @@ CREATE TABLE IF NOT EXISTS sirius_nodes (
 
 def init_db(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db_path, timeout=10) as conn:
+    # `with sqlite3.connect()` commits but does NOT close the fd — close
+    # explicitly (same lesson as polaris_watchdog.data_age_seconds()).
+    conn = sqlite3.connect(db_path, timeout=10)
+    try:
         conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
         conn.executescript(SCHEMA)
         conn.commit()
+    finally:
+        conn.close()
 
 
 def prune_old(db_path: Path, retention_days: int = RETENTION_DAYS) -> int:
@@ -82,13 +87,16 @@ def prune_old(db_path: Path, retention_days: int = RETENTION_DAYS) -> int:
     if retention_days <= 0:
         return 0
     cutoff = int(time.time()) - retention_days * 86400
-    with sqlite3.connect(db_path, timeout=10) as conn:
+    conn = sqlite3.connect(db_path, timeout=10)
+    try:
         conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
         deleted = conn.execute(
             "DELETE FROM gex_snapshots WHERE ts < ?", (cutoff,)
         ).rowcount or 0
         conn.execute("DELETE FROM sirius_nodes WHERE ts < ?", (cutoff,))
         conn.commit()
+    finally:
+        conn.close()
     return deleted
 
 
@@ -123,7 +131,8 @@ def flush_cache(cache: GEXCache, db_path: Path) -> int:
                 )
             )
 
-    with sqlite3.connect(db_path, timeout=10) as conn:
+    conn = sqlite3.connect(db_path, timeout=10)
+    try:
         conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
         conn.executemany(
             "INSERT OR REPLACE INTO gex_snapshots VALUES (?,?,?,?,?,?,?)",
@@ -134,6 +143,8 @@ def flush_cache(cache: GEXCache, db_path: Path) -> int:
             rows_sirius,
         )
         conn.commit()
+    finally:
+        conn.close()
     return len(rows_gex)
 
 
