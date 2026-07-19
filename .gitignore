@@ -41,3 +41,7 @@ nohup.out
 .claude/launch.json
 .vercel
 lseg-data.config.json
+
+# Local auth secrets (never commit)
+data/.session_secret
+data/.polaris_access.txt

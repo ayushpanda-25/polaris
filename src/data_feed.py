@@ -1108,17 +1108,20 @@ class PrometheusBackupFeed:
                 continue
 
             oi = o.get("open_interest")
-            oi = float(oi) if oi else 0.0
+            # `x == x` is False only for NaN — json can parse the token `NaN`,
+            # and NaN slips past `if oi else`/`oi <= 0` guards, poisoning gex_value
+            # and the Star Node. Treat NaN like a missing value here and below.
+            oi = float(oi) if oi and oi == oi else 0.0
             if oi <= 0:
                 # Rare with CBOE (OI is real even for 0DTE) — fall back to
                 # today's volume rather than dropping a populated contract.
                 vol = o.get("volume")
-                oi = float(vol) if vol else 0.0
+                oi = float(vol) if vol and vol == vol else 0.0
                 if oi <= 0:
                     continue
 
             iv = o.get("iv")
-            iv = float(iv) if iv else 0.0
+            iv = float(iv) if iv and iv == iv else 0.0
             if iv > 3:  # defensive percent→decimal, CBOE is already decimal
                 iv = iv / 100
 
@@ -1128,7 +1131,7 @@ class PrometheusBackupFeed:
                 T = 0.5 / 365.0  # 0DTE: half a day keeps BS math sane
 
             native_gamma = o.get("gamma")
-            native_gamma = float(native_gamma) if native_gamma else 0.0
+            native_gamma = float(native_gamma) if native_gamma and native_gamma == native_gamma else 0.0
             if native_gamma > 0:
                 gamma = native_gamma
             elif iv > 0:

@@ -13,7 +13,9 @@ access until the browser session ends or the user hits /logout.
 """
 from __future__ import annotations
 
+import hmac
 import re
+import secrets
 import time
 
 from flask import Flask, Response, redirect, request, session
@@ -21,10 +23,14 @@ from flask import Flask, Response, redirect, request, session
 # Lazy import to avoid circular dependency at module level.
 # config is imported inside register_auth() instead.
 
-# Paths that must bypass auth (Dash static assets, login routes, etc.)
+# Paths that must bypass auth (login routes + Dash STATIC assets only).
+# NB: the bare "/_dash-" prefix used to be here — it whitelisted the Dash DATA
+# endpoints (/_dash-update-component, /_dash-layout, /_dash-dependencies) too,
+# leaking the live GEX grid to anyone unauthenticated. Only the static bundle
+# path is public now; the data endpoints fall back to requiring a session.
 _PUBLIC_PREFIXES = (
     "/login",
-    "/_dash-",
+    "/_dash-component-suites/",
     "/assets/",
     "/_favicon",
     "/_reload-hash",
@@ -334,8 +340,11 @@ def register_auth(server: Flask) -> None:
         from . import config as _  # noqa: F401 — force path resolution
         import config as app_config
 
-    server.secret_key = getattr(app_config, "SESSION_SECRET", "polaris-fallback-key")
+    # SESSION_SECRET is always a strong value from config (env or generated); the
+    # fallback here is a random per-process key, never a guessable literal.
+    server.secret_key = getattr(app_config, "SESSION_SECRET", None) or secrets.token_hex(32)
     friend_codes = [c.lower() for c in getattr(app_config, "FRIEND_CODES", [])]
+    allow_byok = bool(getattr(app_config, "ALLOW_BYOK", False))
 
     @server.before_request
     def _auth_gate():
@@ -361,9 +370,11 @@ def register_auth(server: Flask) -> None:
         lseg_key = (request.form.get("lseg_key") or "").strip()
         code = (request.form.get("friend_code") or "").strip()
 
-        # Try friend code first (if provided)
+        # Try friend code first (if provided). Constant-time compare against each
+        # configured code so response timing can't leak the secret char by char.
         if code:
-            if code.lower() in friend_codes:
+            probe = code.lower()
+            if any(hmac.compare_digest(probe, fc) for fc in friend_codes):
                 session["authenticated"] = True
                 session["method"] = "friend_code"
                 session["ts"] = int(time.time())
@@ -373,15 +384,17 @@ def register_auth(server: Flask) -> None:
                 mimetype="text/html; charset=utf-8",
             )
 
-        # Try LSEG key
+        # Try LSEG key. Disabled by default: a bare 32-hex string is only a
+        # FORMAT check (the served data is the owner's feed regardless), so it
+        # granted access to anyone. Re-enable with POLARIS_ALLOW_BYOK=1.
         if lseg_key:
-            if _LSEG_KEY_RE.match(lseg_key):
+            if allow_byok and _LSEG_KEY_RE.match(lseg_key):
                 session["authenticated"] = True
                 session["method"] = "lseg_key"
                 session["ts"] = int(time.time())
                 return redirect("/")
             return Response(
-                _login_html(error="Invalid LSEG API key."),
+                _login_html(error="Invalid access code."),
                 mimetype="text/html; charset=utf-8",
             )
 
