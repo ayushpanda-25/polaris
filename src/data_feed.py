@@ -1329,6 +1329,16 @@ def save_snapshot(snap: ChainSnapshot, directory: Path) -> Path:
 def make_feed(mode: str = "synthetic", replay_dir: Optional[Path] = None) -> OptionsFeed:
     if mode == "synthetic":
         return SyntheticOptionsFeed()
+    if mode == "cboe":
+        # CBOE-only — THE member-facing mode. No LSEG object is ever
+        # constructed on this path: Ayush's LSEG license is single-user, so
+        # anything members can reach serves CBOE (delayed) exclusively.
+        # This also kills the recurring STALE banner: the old lseg-mode
+        # breaker re-probed LSEG every cooldown, and each probe blocked the
+        # single compute loop for 2–15 min (3 spot candidates × 30s timeouts,
+        # sometimes a wedged open_session) — freezing EVERY ticker's updates.
+        # "--lseg" remains available for Ayush's own personal, local runs.
+        return PrometheusBackupFeed()
     if mode == "lseg":
         # LSEG primary with the Prometheus/CBOE backup behind a breaker.
         # A broken backup never blocks startup — it degrades to LSEG-only.

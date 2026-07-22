@@ -1053,8 +1053,8 @@ def create_app(cache, tickers: list[str]) -> Dash:
 
     def _build_freshness_badge(status, source=None):
         """Pulsing dot + state + age, in the floating nav — plus an explicit
-        disclosure pill whenever data is coming from the CBOE backup, so a
-        LIVE badge can't quietly mean delayed backup data."""
+        disclosure pill whenever data is CBOE, so a LIVE badge can't quietly
+        mean delayed data. (CBOE is the standard member-facing feed.)"""
         age = ""
         if status.age_seconds is not None:
             age = status.message.split("updated ")[-1].split(" — ")[0] \
@@ -1066,10 +1066,10 @@ def create_app(cache, tickers: list[str]) -> Dash:
         ]
         if source == "cboe":
             badge.append(html.Span(
-                "CBOE backup · 15m delayed",
+                "CBOE · 15m delayed",
                 className="src-pill",
-                title=("LSEG is unreachable — serving delayed CBOE chains "
-                       "via Prometheus. Recovers automatically."),
+                title=("Polaris runs on CBOE delayed data. Read the map for "
+                       "levels; trigger from live price on your own chart."),
             ))
         return badge
 
@@ -1262,15 +1262,19 @@ def create_app(cache, tickers: list[str]) -> Dash:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--synthetic", action="store_true", help="Use synthetic feed")
-    parser.add_argument("--lseg", action="store_true", help="Use live LSEG feed (Milestone 2)")
+    parser.add_argument("--cboe", action="store_true",
+                        help="CBOE delayed feed — the member-facing mode (no LSEG)")
+    parser.add_argument("--lseg", action="store_true",
+                        help="LSEG feed w/ CBOE fallback — Ayush's PERSONAL use only "
+                             "(single-user license; never run this for members)")
     parser.add_argument("--port", type=int, default=8050)
     parser.add_argument("--no-db", action="store_true", help="Disable SQLite writer")
     args = parser.parse_args()
 
-    if not args.synthetic and not args.lseg:
-        args.synthetic = True  # default
+    if not args.synthetic and not args.lseg and not args.cboe:
+        args.synthetic = True  # default (dev)
 
-    mode = "synthetic" if args.synthetic else "lseg"
+    mode = "synthetic" if args.synthetic else ("cboe" if args.cboe else "lseg")
     print(f"[dashboard] starting in {mode} mode")
 
     cache = get_cache()

@@ -2,7 +2,13 @@
 """
 Polaris dashboard watchdog.
 
-Why this exists
+CBOE-ONLY (2026-07-21): the member-facing instance runs `--cboe` — no LSEG
+anywhere in its path (single-user license; members always get CBOE delayed).
+The Workspace RED/AMBER gating below in this docstring is historical; the
+loop now restarts directly on darkness, plus thread-count and data-freshness
+backstops.
+
+Why this exists (historical, lseg-era)
 ---------------
 Polaris's ComputeLoop opens its own LSEG desktop session via
 refinitiv-data. When that session goes stale (Workspace relaunch,
@@ -48,7 +54,11 @@ from pathlib import Path
 PYTHON = "/usr/local/bin/python3"
 POLARIS_DIR = Path.home() / "Claude" / "polaris"
 DASHBOARD_MODULE = "src.dashboard"
-DASHBOARD_ARGS = ["--lseg"]
+# CBOE-only: the member-facing instance NEVER runs LSEG (single-user license;
+# members get CBOE delayed). This also ended the recurring STALE banners —
+# lseg-mode's breaker probes blocked the compute loop 2–15 min per cooldown.
+# Ayush's personal LSEG runs (--lseg) are manual and not watchdog-managed.
+DASHBOARD_ARGS = ["--cboe"]
 
 DASHBOARD_LOG = Path("/tmp/polaris_dashboard.log")
 WATCHDOG_LOG = Path("/tmp/polaris_watchdog.log")
@@ -82,14 +92,13 @@ def _data_probe_url()  -> str: return _workspace_url(
 APP_KEY = "REDACTED_KEY_ROTATED_2026-08-24"
 TOKEN_TTL_SEC = 1800         # refresh cached handshake token every 30 min
 
-# Module-level cache for the stateless data-layer probe. We do not want to
-# hit /api/handshake on every 30s poll — it's slow and churns Workspace state.
+# NOTE (CBOE-only, 2026-07-21): the Workspace/LSEG probe machinery below
+# (proxy ports, handshake token, proxy_responsive / data_layer_responsive)
+# is NO LONGER CALLED by the main loop — the member-facing instance runs
+# --cboe and has no Workspace dependency. Kept only in case a personal
+# --lseg watchdog setup ever returns.
 _cached_token: str | None = None
 _cached_token_at: float = 0.0
-# How many consecutive polls we've seen AMBER (proxy OK, data layer dead).
-# Reset to 0 on any GREEN check / successful restart. Used to keep the log
-# quiet after the first full hint in a streak.
-consecutive_data_dead = 0
 
 POLL_INTERVAL = 30           # sec between checks
 # Empirical cadence when polaris's LSEG session is dead:
@@ -126,7 +135,7 @@ GEX_DB = POLARIS_DIR / "data" / "gex.db"
 # Regex that matches a polaris dashboard process's argv.
 # We identify by the module+args, not by PID, so the watchdog can
 # adopt an already-running dashboard.
-POLARIS_CMD_RE = re.compile(r"src\.dashboard.*--lseg")
+POLARIS_CMD_RE = re.compile(r"src\.dashboard.*--cboe")
 
 # Extracts the line timestamp and whether it's a compute_loop failure.
 # Dash access log uses: 127.0.0.1 - - [DD/Mon/YYYY HH:MM:SS] "..."
@@ -164,7 +173,7 @@ def run(cmd: list[str], timeout: float = 5) -> subprocess.CompletedProcess:
 def polaris_pids() -> list[int]:
     """PIDs of any running polaris dashboard process."""
     try:
-        out = run(["pgrep", "-f", r"src\.dashboard.*--lseg"], timeout=3).stdout
+        out = run(["pgrep", "-f", r"src\.dashboard.*--cboe"], timeout=3).stdout
         return [int(p) for p in out.split() if p.strip().isdigit()]
     except Exception:
         return []
@@ -506,8 +515,6 @@ def main() -> int:
     log(f"  poll={POLL_INTERVAL}s  window={DARKNESS_WINDOW}s  "
         f"threshold={DARKNESS_THRESHOLD}  min_restart={MIN_RESTART_INTERVAL}s")
 
-    global consecutive_data_dead
-
     last_restart = 0.0
     last_start   = 0.0   # tracks when the current process was spawned
 
@@ -584,62 +591,18 @@ def main() -> int:
                     time.sleep(POLL_INTERVAL)
                     continue
 
-                # Below darkness threshold — cross-check the data layer so
-                # we notice early if Workspace has started hanging behind
-                # the scenes (before polaris's own log catches up).
-                ws_data_ok = data_layer_responsive()
-                ws_str = "OK" if ws_data_ok else "DOWN"
                 age_str = f"{int(data_age)}s" if data_age is not None else "?"
                 log(f"polaris healthy (pids={pids}, thr={threads}, "
                     f"data_age={age_str}, "
-                    f"{fails} fails in last {DARKNESS_WINDOW}s, "
-                    f"ws-data={ws_str})")
-                if ws_data_ok:
-                    consecutive_data_dead = 0
+                    f"{fails} fails in last {DARKNESS_WINDOW}s)")
                 time.sleep(POLL_INTERVAL)
                 continue
 
-            # Dark — but is it fixable by a restart?
-            # RED: proxy itself not answering → Workspace not running.
-            if not proxy_responsive():
-                log(
-                    f"RED: Workspace proxy at :9000 not responding "
-                    f"({fails} fails in last {DARKNESS_WINDOW}s). "
-                    f"Launch Refinitiv Workspace."
-                )
-                time.sleep(POLL_INTERVAL)
-                continue
-
-            # AMBER: proxy reports ready, but the data plane is hung.
-            # Restarting polaris will not fix this — Workspace itself
-            # needs to be relaunched. Full hint on first AMBER in a
-            # streak, terse follow-ups after.
-            if not data_layer_responsive():
-                consecutive_data_dead += 1
-                if consecutive_data_dead == 1:
-                    log(
-                        f"AMBER: Workspace proxy OK but data-layer hung "
-                        f"(status=ST_PROXY_READY but /api/rdp/data/... "
-                        f"not returning). Polaris dark ({fails} fails in "
-                        f"last {DARKNESS_WINDOW}s). Restart will not fix "
-                        f"this — please fully quit and relaunch Refinitiv "
-                        f"Workspace, then log back in."
-                    )
-                else:
-                    waited = consecutive_data_dead * POLL_INTERVAL
-                    log(
-                        f"AMBER (still waiting, {consecutive_data_dead}th "
-                        f"cycle, ~{waited}s since first AMBER; manual "
-                        f"Workspace relaunch still required)"
-                    )
-                time.sleep(POLL_INTERVAL)
-                continue
-
-            # GREEN path reached despite darkness → both layers are fine,
-            # polaris itself is the stuck component. Reset AMBER streak
-            # and take the normal restart branch.
-            consecutive_data_dead = 0
-
+            # Dark — CBOE-only mode: no Workspace to gate on. Failures here
+            # mean CBOE fetch errors (transient 503s) or a stuck process; a
+            # rate-limited restart is safe either way (fresh process, fresh
+            # TTL caches; if the CDN itself is down we just retry per
+            # MIN_RESTART_INTERVAL until it isn't).
             if time.time() - last_restart < MIN_RESTART_INTERVAL:
                 log(f"polaris dark ({fails} fails) but rate-limited")
                 time.sleep(POLL_INTERVAL)

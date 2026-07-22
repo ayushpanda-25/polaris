@@ -109,7 +109,7 @@ def evaluate_freshness(
             state=FreshnessState.OFFLINE,
             age_seconds=None,
             last_update_ts=None,
-            message="No data yet — bridge may not be running",
+            message="No data yet — feed warming up",
         )
 
     age = now - last_update_ts
@@ -141,7 +141,7 @@ def evaluate_freshness(
             last_update_ts=last_update_ts,
             message=(
                 f"⚠️  STALE — last update {_format_age(age)}. "
-                f"Bridge likely down or Mac asleep. Do not trust these values."
+                f"Feed interrupted or host asleep. Do not trust these values."
             ),
         )
 
@@ -151,7 +151,7 @@ def evaluate_freshness(
         last_update_ts=last_update_ts,
         message=(
             f"⛔  OFFLINE — last update {_format_age(age)}. "
-            f"Waiting for bridge to come back online…"
+            f"Waiting for the feed to come back…"
         ),
     )
 
