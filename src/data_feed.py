@@ -14,6 +14,7 @@ import math
 import os
 import pickle
 import random
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -211,6 +212,12 @@ class SyntheticOptionsFeed:
                         ticker, strike, otype, days_to_expiry=days
                     )
 
+                    # Synthetic volume: churn rises near ATM and for short
+                    # expiries, so the sign-confidence layer has realistic
+                    # 0DTE-style churn to flag off-hours.
+                    churn_factor = atm_factor * (2.5 / max(days, 1))
+                    volume = oi * churn_factor * self._rng.uniform(0.5, 1.5)
+
                     contracts.append(
                         OptionContract(
                             strike=strike,
@@ -221,6 +228,7 @@ class SyntheticOptionsFeed:
                             open_interest=oi,
                             dealer_sign=sign,
                             color=color,
+                            volume=volume,
                         )
                     )
 
@@ -944,6 +952,7 @@ class LSEGOptionsFeed:
                     open_interest=oi,
                     dealer_sign=sign,
                     color=color,
+                    volume=(volume if volume and volume > 0 else 0.0),
                 )
             )
 
@@ -990,11 +999,70 @@ PROMETHEUS_DIR = os.environ.get(
 )
 
 
-def _import_prometheus_cboe():
-    """Import prometheus.providers.cboe + parse_occ from the repo on disk.
+# --- Vendored, self-contained CBOE fetch (no prometheus repo needed) -------
+# The Mac imports the real prometheus.providers.cboe (single source of truth).
+# But the cloud terminal (Vercel serverless) has no ~/Claude/prometheus on
+# disk, so _import_prometheus_cboe() falls back to this pure-stdlib shim: one
+# urllib GET to the same CBOE CDN + an OCC-symbol parser. No extra dependency
+# (urllib is stdlib), so the lambda stays lean and license-clean (CBOE only).
 
-    Raises ImportError with a actionable message if the repo moved or the
-    package layout changed.
+_VENDORED_OCC_RE = re.compile(
+    r"^(?P<root>[A-Z]{1,6})(?P<yy>\d{2})(?P<mm>\d{2})(?P<dd>\d{2})"
+    r"(?P<cp>[CP])(?P<strike>\d{8})$"
+)
+
+# CBOE serves index chains under a leading-underscore file (_SPX.json, _VIX.json).
+_CBOE_INDEX_SYMBOLS = {"SPX", "SPXW", "VIX", "VIXW", "NDX", "RUT", "VVIX", "XSP", "DJX", "OEX"}
+_CBOE_URL = "https://cdn.cboe.com/api/global/delayed_quotes/options/{symbol}.json"
+
+
+def _vendored_parse_occ(symbol: str):
+    """('SPY260605C00708000') -> ('SPY', date(2026,6,5), 'C', 708.0). Mirrors
+    prometheus.models.parse_occ so _snapshot_from_raw is source-agnostic."""
+    m = _VENDORED_OCC_RE.match((symbol or "").strip())
+    if not m:
+        raise ValueError(f"Unparseable OCC symbol: {symbol!r}")
+    exp = date(2000 + int(m["yy"]), int(m["mm"]), int(m["dd"]))
+    strike = int(m["strike"]) / 1000.0
+    return m["root"], exp, m["cp"], strike
+
+
+class _VendoredCboe:
+    """Drop-in for prometheus.providers.cboe with just the one method the
+    backup feed calls: fetch_raw(underlying) -> raw CBOE JSON. Pure stdlib."""
+
+    _UA = "polaris-md/0.1 (personal research)"
+
+    @classmethod
+    def _url(cls, symbol: str) -> str:
+        s = (symbol or "").upper().lstrip("_")
+        if s in _CBOE_INDEX_SYMBOLS:
+            s = "_" + s
+        return _CBOE_URL.format(symbol=s)
+
+    @classmethod
+    def fetch_raw(cls, underlying: str, session=None) -> dict:
+        # `requests` (bundles certifi) mirrors the real prometheus provider and
+        # gives robust TLS on every host — stdlib urllib trips over missing CA
+        # certs on some Python builds. requests is a tiny lambda cost vs plotly.
+        import requests
+
+        timeout = float(os.environ.get("PROMETHEUS_HTTP_TIMEOUT", "15"))
+        getter = session.get if session is not None else requests.get
+        resp = getter(cls._url(underlying), headers={"User-Agent": cls._UA}, timeout=timeout)
+        if resp.status_code != 200:
+            raise RuntimeError(f"CBOE fetch for {underlying!r} failed: HTTP {resp.status_code} {cls._url(underlying)}")
+        return resp.json()
+
+
+def _import_prometheus_cboe():
+    """Return (cboe_provider, parse_occ).
+
+    Prefer the real prometheus package on disk (Ayush's Mac — single source of
+    truth). If it isn't importable (cloud serverless, repo moved), fall back to
+    the self-contained stdlib shim above so the CBOE-only cloud terminal works
+    with no local repo. Never raises — CBOE is the member-facing feed and must
+    always be available.
     """
     import sys as _sys
     if PROMETHEUS_DIR not in _sys.path:
@@ -1002,12 +1070,9 @@ def _import_prometheus_cboe():
     try:
         from prometheus.providers import cboe as prom_cboe
         from prometheus.models import parse_occ as prom_parse_occ
-    except ImportError as e:
-        raise ImportError(
-            f"Prometheus package not importable from {PROMETHEUS_DIR} "
-            f"(set POLARIS_PROMETHEUS_DIR if the repo moved): {e}"
-        ) from e
-    return prom_cboe, prom_parse_occ
+        return prom_cboe, prom_parse_occ
+    except ImportError:
+        return _VendoredCboe, _vendored_parse_occ
 
 
 class PrometheusBackupFeed:
@@ -1112,6 +1177,7 @@ class PrometheusBackupFeed:
             # and NaN slips past `if oi else`/`oi <= 0` guards, poisoning gex_value
             # and the Star Node. Treat NaN like a missing value here and below.
             oi = float(oi) if oi and oi == oi else 0.0
+            oi_is_real = oi > 0   # False once we fall back to volume-as-OI below
             if oi <= 0:
                 # Rare with CBOE (OI is real even for 0DTE) — fall back to
                 # today's volume rather than dropping a populated contract.
@@ -1148,6 +1214,19 @@ class PrometheusBackupFeed:
                 vanna = 0.0
                 color = 0.0
 
+            # Today's traded volume — for the sign-confidence layer. Only when
+            # OI is REAL resting OI: if OI itself fell back to volume above,
+            # reporting volume here too makes churn a meaningless ~1.0 artifact
+            # that would falsely flag the cell. Same NaN guard as OI/IV; clamp
+            # any stray negative to 0 (matches the LSEG path's `> 0` guard).
+            if oi_is_real:
+                vol_raw = o.get("volume")
+                volume = float(vol_raw) if vol_raw and vol_raw == vol_raw else 0.0
+                if volume < 0:
+                    volume = 0.0
+            else:
+                volume = 0.0
+
             sign = blended_dealer_sign(
                 ticker, strike, otype, days_to_expiry=days_to_expiry
             )
@@ -1162,6 +1241,7 @@ class PrometheusBackupFeed:
                     open_interest=oi,
                     dealer_sign=sign,
                     color=color,
+                    volume=volume,
                 )
             )
 

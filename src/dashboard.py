@@ -30,6 +30,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from src.compute_loop import ComputeLoop
     from src.data_feed import make_feed
+    from src.flow_confidence import assess_confidence, sirius_confidence
     from src.gex_engine import GEXGrid
     from src.learn_page import register_learn_route
     from src.memory_cache import get_cache
@@ -44,6 +45,7 @@ if __package__ in (None, ""):
 else:
     from .compute_loop import ComputeLoop
     from .data_feed import make_feed
+    from .flow_confidence import assess_confidence, sirius_confidence
     from .gex_engine import GEXGrid
     from .learn_page import register_learn_route
     from .memory_cache import get_cache
@@ -485,6 +487,14 @@ def _build_heatmap_figure(
     _add_cell_labels(fig, text_grid, z_color, vmax,
                      expiry_labels, strike_labels, pal, size=10.5)
 
+    # ── Sign-confidence layer (GEX mode only) ────────────────────────────
+    # Flags near-spot, short-dated cells where the textbook call+/put- sign
+    # is unreliable (0DTE churn or balanced call/put OI). It does NOT change
+    # any value — it only caveats the sign on the cells where Polaris and
+    # flow-aware maps disagree. Off for VEX/Color/√T (different metric).
+    cmap = assess_confidence(grid) if mode == "gex" else None
+    star_trace = None  # built below, added AFTER the ring so its card wins hover
+
     # Star Node marker — glowing bracketed corners (viewfinder reticle)
     if nodes and nodes.sirius is not None:
         sx_label = _format_exp(nodes.sirius.expiry)
@@ -493,24 +503,70 @@ def _build_heatmap_figure(
             x_idx = expiry_labels.index(sx_label)
             y_idx = strike_labels.index(sy_label)
             _add_bracket_corners(fig, x_idx, y_idx, pal["accent"])
-            # Invisible scatter marker for hover info
+            star_caveat = ""
+            if cmap is not None:
+                sc = cmap.get(nodes.sirius.strike, nodes.sirius.expiry)
+                if sc and sc.is_low:
+                    star_caveat = (
+                        "<br><b>⚠ SIGN UNCERTAIN</b><br>"
+                        + "<br>".join(sc.reasons)
+                    )
+            # Built here, added LAST (after the ring overlay) so this richer
+            # caveated card wins the hover tie at the star cell instead of the
+            # ring's generic "SIGN UNCERTAIN" hover.
+            star_trace = go.Scatter(
+                x=[sx_label],
+                y=[sy_label],
+                mode="markers",
+                marker=dict(size=30, color="rgba(0,0,0,0)"),
+                name="Star Node",
+                showlegend=False,
+                hovertemplate=(
+                    f"<b>★ STAR NODE</b><br>"
+                    f"STRIKE  {nodes.sirius.strike}<br>"
+                    f"EXPIRY  {nodes.sirius.expiry}<br>"
+                    f"VALUE   ${nodes.sirius.value:,.0f}K"
+                    f"{star_caveat}"
+                    f"<extra></extra>"
+                ),
+            )
+
+    # Ring every low-confidence cell so the caveat is visible on the map,
+    # not just in the Star Node hover.
+    if cmap is not None:
+        lx, ly, lhover = [], [], []
+        for (strike, expiry), cc in cmap.cells.items():
+            if not cc.is_low:
+                continue
+            xl = _format_exp(expiry)
+            yl = f"{strike:g}"
+            if xl in expiry_labels and yl in strike_labels:
+                lx.append(xl)
+                ly.append(yl)
+                lhover.append("⚠ SIGN UNCERTAIN<br>" + "<br>".join(cc.reasons))
+        if lx:
             fig.add_trace(
                 go.Scatter(
-                    x=[sx_label],
-                    y=[sy_label],
+                    x=lx,
+                    y=ly,
                     mode="markers",
-                    marker=dict(size=30, color="rgba(0,0,0,0)"),
-                    name="Star Node",
-                    showlegend=False,
-                    hovertemplate=(
-                        f"<b>★ STAR NODE</b><br>"
-                        f"STRIKE  {nodes.sirius.strike}<br>"
-                        f"EXPIRY  {nodes.sirius.expiry}<br>"
-                        f"VALUE   ${nodes.sirius.value:,.0f}K"
-                        f"<extra></extra>"
+                    marker=dict(
+                        symbol="circle-open",
+                        size=13,
+                        color="rgba(0,0,0,0)",
+                        line=dict(color="rgba(255,190,80,0.85)", width=1.4),
                     ),
+                    name="sign uncertain",
+                    showlegend=False,
+                    customdata=lhover,
+                    hovertemplate="%{customdata}<extra></extra>",
                 )
             )
+
+    # Star hover added LAST so its full caveated card sits on top of the ring
+    # at the star cell (hovermode="closest" breaks ties to the later trace).
+    if star_trace is not None:
+        fig.add_trace(star_trace)
 
     # Spot price horizontal reference line — starlight white
     if strike_labels:
@@ -795,6 +851,10 @@ def _reading_guide():
                         item("Spot line", "The dotted white line is where price "
                                           "is right now. Read the walls above "
                                           "vs below it."),
+                        item("⚠ Amber ring", "A near-spot 0DTE cell whose sign "
+                                             "is unreliable — churned by same-day "
+                                             "flow or split 50/50 calls vs puts. "
+                                             "Trust the wall, not its + / − here."),
                     ]),
                     html.Div(className="g-col", children=[
                         html.Div("THE VIEWS", className="g-head"),
@@ -838,7 +898,8 @@ def _reading_guide():
 
 # --------------- App layout ---------------
 
-def create_app(cache, tickers: list[str]) -> Dash:
+def create_app(cache, tickers: list[str], gate_auth: bool = True,
+               poll_seconds: int | None = None) -> Dash:
     # Assets folder is at project root, not next to this script
     assets_path = str(Path(__file__).resolve().parents[1] / "assets")
     app = Dash(__name__, title="Polaris", assets_folder=assets_path)
@@ -864,9 +925,12 @@ def create_app(cache, tickers: list[str]) -> Dash:
 </html>"""
 
     # Auth gate — login page before Dash loads. Must come before
-    # register_learn_route so /login takes priority.
-    from .auth import register_auth
-    register_auth(app.server)
+    # register_learn_route so /login takes priority. Skipped on the public
+    # cloud terminal (gate_auth=False): it serves CBOE-only public data, so
+    # there's nothing license-restricted to gate. LSEG never reaches this app.
+    if gate_auth:
+        from .auth import register_auth
+        register_auth(app.server)
 
     register_learn_route(app.server)
 
@@ -953,8 +1017,12 @@ def create_app(cache, tickers: list[str]) -> Dash:
                             html.Div(id="freshness-badge", className="nav-status"),
                             html.A("Learn", href="/learn", target="_blank",
                                    className="nav-link"),
-                            html.A("Sign out", href="/logout",
-                                   className="nav-link nav-link-dim"),
+                            # Sign out only exists where there's a login gate.
+                            # The public cloud terminal (gate_auth=False) has no
+                            # session, so a "Sign out" link would be a dead end.
+                            *([html.A("Sign out", href="/logout",
+                                      className="nav-link nav-link-dim")]
+                              if gate_auth else []),
                         ],
                     ),
                 ],
@@ -1040,7 +1108,14 @@ def create_app(cache, tickers: list[str]) -> Dash:
 
             # Palette persistence (localStorage) + poll
             dcc.Store(id="palette-store", storage_type="local"),
-            dcc.Interval(id="poll", interval=app_config.DASHBOARD_POLL * 1000, n_intervals=0),
+            dcc.Interval(id="poll",
+                         interval=(poll_seconds or app_config.DASHBOARD_POLL) * 1000,
+                         n_intervals=0),
+            # Browser-only heartbeat (fires a clientside callback, never hits the
+            # server) that pauses `poll` while the tab is hidden — a backgrounded
+            # cloud terminal shouldn't burn Vercel Active CPU rebuilding a figure
+            # nobody's looking at.
+            dcc.Interval(id="visbeat", interval=4000, n_intervals=0),
         ],
     )
 
@@ -1255,6 +1330,17 @@ def create_app(cache, tickers: list[str]) -> Dash:
                                    reshuffle_age, palette)
 
         return fig, badge, banner, header, node_row, blurb
+
+    # Gate the server poll on tab visibility. `visbeat` is a clientside-only
+    # interval, so this callback runs in the browser and costs ZERO serverless
+    # invocations — it just sets poll.disabled = document.hidden every few
+    # seconds. Hidden/backgrounded tab → poll stops → no figure rebuilds → no
+    # Active CPU. Tab visible again → visbeat (never disabled) flips it back on.
+    app.clientside_callback(
+        "function(_n){ return document.hidden; }",
+        Output("poll", "disabled"),
+        Input("visbeat", "n_intervals"),
+    )
 
     return app
 

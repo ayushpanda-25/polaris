@@ -69,6 +69,7 @@ class OptionContract:
     open_interest: float
     dealer_sign: int      # +1 long, -1 short — from sign_imputation
     color: float = 0.0    # ∂Γ/∂t — optional, 0 if not populated
+    volume: float = 0.0   # today's traded contracts — for churn/confidence, 0 if not populated
 
     def gex_dollars(self, spot: float) -> float:
         """GEX in dollars — delta-hedging flow per $1 move in the underlying.
@@ -128,6 +129,32 @@ class GEXCell:
     vex_value: float
     color_value: float = 0.0     # Color (∂Γ/∂t) exposure
     gex_normalized: float = 0.0  # GEX * sqrt(T) for cross-expiry comparison
+    # Raw OI/volume split by option type (contracts, NOT $). Populated by
+    # compute_grid; feed the sign-confidence layer (flow_confidence.py) and
+    # the daily OI log. Default 0 keeps older callers/pickles working.
+    call_oi: float = 0.0
+    put_oi: float = 0.0
+    call_volume: float = 0.0
+    put_volume: float = 0.0
+
+    @property
+    def total_oi(self) -> float:
+        return self.call_oi + self.put_oi
+
+    @property
+    def total_volume(self) -> float:
+        return self.call_volume + self.put_volume
+
+    @property
+    def churn(self) -> float:
+        """Today's volume / resting OI at this cell. >~1 means the strike is
+        being churned by same-day flow rather than reflecting resting
+        positioning — exactly where the textbook call+/put- sign is least
+        reliable. Returns 0.0 when OI is unknown (no false 'churn' signal)."""
+        oi = self.total_oi
+        if oi <= 0:
+            return 0.0
+        return self.total_volume / oi
 
 
 @dataclass
@@ -188,6 +215,11 @@ def compute_grid(
     vex_buckets: dict[tuple[float, str], float] = {}
     color_buckets: dict[tuple[float, str], float] = {}
     norm_buckets: dict[tuple[float, str], float] = {}
+    # Raw OI/volume split by option type — for the sign-confidence layer.
+    call_oi_buckets: dict[tuple[float, str], float] = {}
+    put_oi_buckets: dict[tuple[float, str], float] = {}
+    call_vol_buckets: dict[tuple[float, str], float] = {}
+    put_vol_buckets: dict[tuple[float, str], float] = {}
 
     for c in contracts:
         key = (c.strike, c.expiry)
@@ -195,6 +227,12 @@ def compute_grid(
         vex_buckets[key] = vex_buckets.get(key, 0) + c.vex_dollars(spot)
         color_buckets[key] = color_buckets.get(key, 0) + c.color_dollars(spot)
         norm_buckets[key] = norm_buckets.get(key, 0) + c.gex_dollars_normalized(spot)
+        if c.option_type.upper() == "C":
+            call_oi_buckets[key] = call_oi_buckets.get(key, 0) + c.open_interest
+            call_vol_buckets[key] = call_vol_buckets.get(key, 0) + c.volume
+        else:
+            put_oi_buckets[key] = put_oi_buckets.get(key, 0) + c.open_interest
+            put_vol_buckets[key] = put_vol_buckets.get(key, 0) + c.volume
 
     cells = [
         GEXCell(
@@ -204,6 +242,10 @@ def compute_grid(
             vex_value=vex_buckets[(strike, expiry)] / THOUSANDS,
             color_value=color_buckets[(strike, expiry)] / THOUSANDS,
             gex_normalized=norm_buckets[(strike, expiry)] / THOUSANDS,
+            call_oi=call_oi_buckets.get((strike, expiry), 0.0),
+            put_oi=put_oi_buckets.get((strike, expiry), 0.0),
+            call_volume=call_vol_buckets.get((strike, expiry), 0.0),
+            put_volume=put_vol_buckets.get((strike, expiry), 0.0),
         )
         for (strike, expiry) in gex_buckets.keys()
     ]
