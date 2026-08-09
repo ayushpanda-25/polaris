@@ -16,6 +16,7 @@ from __future__ import annotations
 import hmac
 import re
 import secrets
+import threading
 import time
 
 from flask import Flask, Response, redirect, request, session
@@ -325,6 +326,71 @@ def _login_html(error: str = "") -> str:
 </html>"""
 
 
+# ---------------------------------------------------------------------------
+# Login throttle
+#
+# /login/submit used to accept unlimited guesses at the access code. The code is
+# 16 chars from a large alphabet, so a blind guess is hopeless — but "the secret
+# is long" is not a rate limit, and it stops being true the moment a shorter
+# code is set by hand via POLARIS_FRIEND_CODES.
+#
+# Polaris is ONE long-lived process (the watchdog keeps a single dashboard
+# alive), so an in-memory counter is genuinely authoritative here — unlike a
+# serverless app, where it would reset on every cold start.
+# ---------------------------------------------------------------------------
+_MAX_ATTEMPTS = 8           # failures allowed inside the window
+_ATTEMPT_WINDOW = 300.0     # 5 minutes
+_LOCKOUT = 300.0            # then refuse this IP for 5 minutes
+
+_attempts: dict[str, list[float]] = {}
+_locked_until: dict[str, float] = {}
+_attempts_lock = threading.Lock()
+
+
+def _client_ip() -> str:
+    """Best-effort client identity. Polaris binds 127.0.0.1, so this is nearly
+    always localhost; the proxy headers matter only if it is ever fronted."""
+    fwd = request.headers.get("X-Forwarded-For", "")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.remote_addr or "unknown"
+
+
+def _throttle_retry_after(ip: str) -> int:
+    """Seconds this IP must wait, or 0 if it may try now."""
+    now = time.time()
+    with _attempts_lock:
+        until = _locked_until.get(ip, 0.0)
+        if until > now:
+            return int(until - now) + 1
+        if until:
+            # Lock expired — clear the slate so the next window starts clean.
+            _locked_until.pop(ip, None)
+            _attempts.pop(ip, None)
+    return 0
+
+
+def _record_failure(ip: str) -> None:
+    now = time.time()
+    with _attempts_lock:
+        hits = [t for t in _attempts.get(ip, []) if now - t < _ATTEMPT_WINDOW]
+        hits.append(now)
+        _attempts[ip] = hits
+        if len(hits) >= _MAX_ATTEMPTS:
+            _locked_until[ip] = now + _LOCKOUT
+        # Keep the dicts from growing without bound on a long-lived process.
+        if len(_attempts) > 512:
+            for stale in [k for k, v in _attempts.items() if not v or now - v[-1] > _ATTEMPT_WINDOW]:
+                _attempts.pop(stale, None)
+                _locked_until.pop(stale, None)
+
+
+def _record_success(ip: str) -> None:
+    with _attempts_lock:
+        _attempts.pop(ip, None)
+        _locked_until.pop(ip, None)
+
+
 def register_auth(server: Flask) -> None:
     """
     Wire authentication into a Flask server (the one underlying a Dash app).
@@ -345,6 +411,18 @@ def register_auth(server: Flask) -> None:
     server.secret_key = getattr(app_config, "SESSION_SECRET", None) or secrets.token_hex(32)
     friend_codes = [c.lower() for c in getattr(app_config, "FRIEND_CODES", [])]
     allow_byok = bool(getattr(app_config, "ALLOW_BYOK", False))
+
+    # Session cookie hardening. HttpOnly keeps the cookie away from any script on
+    # the page; SameSite=Lax means another site's form POST or fetch can't ride
+    # the session (Polaris serves the owner's live feed, and the browser will
+    # happily attach cookies to a cross-site request without this). Secure is
+    # left OFF on purpose: Polaris binds 127.0.0.1 over plain http, and a Secure
+    # cookie would simply never be stored. Turn it on if it is ever put behind
+    # TLS.
+    server.config.update(
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+    )
 
     @server.before_request
     def _auth_gate():
@@ -367,6 +445,23 @@ def register_auth(server: Flask) -> None:
 
     @server.route("/login/submit", methods=["POST"])
     def _login_submit():
+        ip = _client_ip()
+
+        # Refuse before comparing anything: a locked-out client shouldn't even
+        # get the timing signal of a comparison, let alone another guess.
+        wait = _throttle_retry_after(ip)
+        if wait:
+            minutes = max(1, (wait + 59) // 60)
+            return Response(
+                _login_html(
+                    error=f"Too many attempts. Try again in {minutes} minute"
+                    f"{'' if minutes == 1 else 's'}."
+                ),
+                status=429,
+                mimetype="text/html; charset=utf-8",
+                headers={"Retry-After": str(wait)},
+            )
+
         lseg_key = (request.form.get("lseg_key") or "").strip()
         code = (request.form.get("friend_code") or "").strip()
 
@@ -375,12 +470,15 @@ def register_auth(server: Flask) -> None:
         if code:
             probe = code.lower()
             if any(hmac.compare_digest(probe, fc) for fc in friend_codes):
+                _record_success(ip)
                 session["authenticated"] = True
                 session["method"] = "friend_code"
                 session["ts"] = int(time.time())
                 return redirect("/")
+            _record_failure(ip)
             return Response(
                 _login_html(error="Invalid access code."),
+                status=401,
                 mimetype="text/html; charset=utf-8",
             )
 
@@ -389,12 +487,15 @@ def register_auth(server: Flask) -> None:
         # granted access to anyone. Re-enable with POLARIS_ALLOW_BYOK=1.
         if lseg_key:
             if allow_byok and _LSEG_KEY_RE.match(lseg_key):
+                _record_success(ip)
                 session["authenticated"] = True
                 session["method"] = "lseg_key"
                 session["ts"] = int(time.time())
                 return redirect("/")
+            _record_failure(ip)
             return Response(
                 _login_html(error="Invalid access code."),
+                status=401,
                 mimetype="text/html; charset=utf-8",
             )
 
