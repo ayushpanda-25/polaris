@@ -1,0 +1,13 @@
+# Serverless (Vercel) runtime deps ONLY — the full modern Polaris UI on CBOE.
+# Kept lean so the lambda stays under maxLambdaSize:
+#   - scipy: not imported anywhere in src/ (greeks are hand-rolled on math+numpy)
+#   - aiosqlite / SQLiteWriter: main()-only (the Mac's writer thread), never the
+#     serverless path
+#   - pytest: tests only
+# pandas is imported lazily (guarded LSEG/vol paths); kept so no surprise
+# ImportError if a path touches it.
+dash>=2.14
+plotly>=5.17
+numpy>=1.24
+pandas>=2.0
+requests>=2.31
