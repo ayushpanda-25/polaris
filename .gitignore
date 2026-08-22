@@ -45,3 +45,4 @@ lseg-data.config.json
 # Local auth secrets (never commit)
 data/.session_secret
 data/.polaris_access.txt
+data/.cloud_session_secret

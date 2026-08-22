@@ -1,5 +1,6 @@
 """
-Vercel serverless entry point for Polaris — the FULL terminal, CBOE-only, public.
+Vercel serverless entry point for Polaris — the FULL terminal, CBOE-only,
+member-gated.
 
 This serves the real modern Polaris UI (palettes, ORION five-panel, VIX crash
 walls, the /learn Academy) — the same `create_app` the Mac runs — but off the
@@ -18,8 +19,12 @@ Two things make the threaded Mac app work as a stateless serverless function:
      falls back to a vendored stdlib fetch here (no local prometheus repo on
      Vercel), so this needs nothing but the CBOE CDN.
 
-Auth is skipped (`gate_auth=False`): there is nothing license-restricted to
-gate. For the live LSEG terminal on the Mac, use `python3 -m src.dashboard`.
+Auth: members sign in with their ASTRAIOS ACCOUNT — the same email and password
+as Meridian, against the same Supabase project, and only if their profile still
+carries live desk access (see src/astraios_auth.py). This used to be open to
+anyone with the URL. Nothing license-restricted was ever exposed (the feed is
+CBOE, never LSEG), but the terminal itself is the member perk, so it is gated
+like one. For the live LSEG terminal on the Mac, use `python3 -m src.dashboard`.
 """
 from __future__ import annotations
 
@@ -104,7 +109,7 @@ try:
 except Exception as e:
     print(f"[polaris-cloud cold-start] SPY prime failed: {e}", file=sys.stderr)
 
-# The real modern terminal — public (CBOE only, nothing to gate).
+# The real modern terminal — CBOE only, gated on Astraios accounts.
 # Poll every 30s on the cloud (env POLARIS_CLOUD_POLL), not the Mac's 15s.
 # CBOE regenerates its file ~every 60s and the quotes are 15-min delayed, so
 # 30s is a responsiveness-feel choice (catches a new file within ~30s) — the
@@ -113,7 +118,8 @@ except Exception as e:
 dash_app = create_app(
     _cache,
     app_config.TICKERS,
-    gate_auth=False,
+    gate_auth=True,
+    auth_mode="astraios",
     poll_seconds=int(os.environ.get("POLARIS_CLOUD_POLL", "30")),
 )
 

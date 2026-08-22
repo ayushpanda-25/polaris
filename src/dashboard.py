@@ -899,7 +899,7 @@ def _reading_guide():
 # --------------- App layout ---------------
 
 def create_app(cache, tickers: list[str], gate_auth: bool = True,
-               poll_seconds: int | None = None) -> Dash:
+               poll_seconds: int | None = None, auth_mode: str = "code") -> Dash:
     # Assets folder is at project root, not next to this script
     assets_path = str(Path(__file__).resolve().parents[1] / "assets")
     app = Dash(__name__, title="Polaris", assets_folder=assets_path)
@@ -925,12 +925,25 @@ def create_app(cache, tickers: list[str], gate_auth: bool = True,
 </html>"""
 
     # Auth gate — login page before Dash loads. Must come before
-    # register_learn_route so /login takes priority. Skipped on the public
-    # cloud terminal (gate_auth=False): it serves CBOE-only public data, so
-    # there's nothing license-restricted to gate. LSEG never reaches this app.
+    # register_learn_route so /login takes priority.
+    #
+    # Two doors, because the two deployments have different problems to solve:
+    #   "code"     — the Mac terminal. One shared access code, read from
+    #                data/.polaris_access.txt. Fine for a loopback-bound app
+    #                only Ayush reaches.
+    #   "astraios" — the public cloud terminal. Real members arrive over the
+    #                open internet, so they sign in with their Astraios account
+    #                (Supabase, same as Meridian) and are checked for live desk
+    #                access. A shared code would have to be handed around and
+    #                could not be revoked per person.
+    # Neither serves anything LSEG-derived; the cloud feed is CBOE-only.
     if gate_auth:
-        from .auth import register_auth
-        register_auth(app.server)
+        if auth_mode == "astraios":
+            from .astraios_auth import register_astraios_auth
+            register_astraios_auth(app.server)
+        else:
+            from .auth import register_auth
+            register_auth(app.server)
 
     register_learn_route(app.server)
 

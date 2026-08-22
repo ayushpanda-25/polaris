@@ -84,5 +84,6 @@ FRIEND_CODES = [
 # data comes from the OWNER's feed regardless, so a bare 32-hex string was a
 # format-only check that let anyone in. Set POLARIS_ALLOW_BYOK=1 to re-enable.
 ALLOW_BYOK = os.environ.get("POLARIS_ALLOW_BYOK", "").strip() in ("1", "true", "yes")
-# Public demo URL (Vercel synthetic data deployment)
+# The cloud terminal. Not a demo any more — it signs members in with their
+# Astraios account, so this link lands on a sign-in card, not open data.
 DEMO_URL = "https://polaris-omega-five.vercel.app"

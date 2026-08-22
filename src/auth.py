@@ -4,7 +4,8 @@ Flask-level authentication gate for Polaris.
 Three tiers:
   1. Astraios members — enter a friend code set in config.FRIEND_CODES.
   2. BYOK users — enter their own LSEG API key (format-validated, not stored).
-  3. Demo — link to Vercel synthetic-data deployment (no auth needed).
+  3. A link out to the cloud terminal, which has its own Astraios account gate
+     (src/astraios_auth.py) — it stopped being an open demo when it was locked.
 
 The gate is a pure Flask layer that sits in front of the Dash app via
 @before_request. The login page is self-contained HTML (no Dash/React
@@ -41,10 +42,9 @@ _PUBLIC_PREFIXES = (
 _LSEG_KEY_RE = re.compile(r"^[a-f0-9]{32,}$", re.IGNORECASE)
 
 
-def _login_html(error: str = "") -> str:
-    """Return the liquid-glass login page as a self-contained HTML string."""
-    # Inline the North Star SVG (scaled up for the login page)
-    star_svg = """
+# The North Star mark, inlined so the login page stays self-contained (it must
+# render before any Dash asset loads). Shared with astraios_auth.py's page.
+STAR_SVG = """
     <svg width="52" height="52" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
       <defs>
         <radialGradient id="ps_core" cx="50%" cy="50%" r="62%">
@@ -68,7 +68,12 @@ def _login_html(error: str = "") -> str:
             fill="url(#ps_core)" filter="url(#ps_glow)"/>
       <circle cx="12" cy="12" r="0.9" fill="#ffffff"/>
     </svg>
-    """
+"""
+
+
+def _login_html(error: str = "") -> str:
+    """Return the liquid-glass login page as a self-contained HTML string."""
+    star_svg = STAR_SVG
 
     error_block = ""
     if error:
@@ -301,7 +306,7 @@ def _login_html(error: str = "") -> str:
         <div class="divider"></div>
 
         <a class="demo-link" href="{demo_url}" target="_blank" rel="noopener">
-            No LSEG key? Try the demo &rarr;
+            Members: open the cloud terminal &rarr;
         </a>
     </div>
 
