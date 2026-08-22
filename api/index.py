@@ -2,7 +2,7 @@
 Vercel serverless entry point for Polaris — the FULL terminal, CBOE-only,
 member-gated.
 
-This serves the real modern Polaris UI (palettes, ORION five-panel, VIX crash
+This serves the real modern Polaris UI (ORION five-panel, VIX crash
 walls, the /learn Academy) — the same `create_app` the Mac runs — but off the
 Mac, always-up, on Vercel. Members open THIS from Meridian.
 

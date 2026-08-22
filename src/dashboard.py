@@ -3,9 +3,11 @@ Plotly Dash dashboard for the HeatSeeker replica.
 
 Liquid-glass UI (Astraios house language — Polaris runs cold/celestial):
     • Floating glass nav: brand, freshness, learn/sign-out
-    • Control deck: ticker rail, view mode, palette picker (persisted)
+    • Control deck: ticker rail, view mode
     • Stat chips: spot, Star Node, value, reshuffle, updated
     • Glass heatmap board: strikes (y) × expiries (x), transparent tiles
+    • Strike tape: hover a cell for its history and rate of change
+      (assets/tape.js, fed by cell_history off the snapshot store)
     • Refresh: dcc.Interval polling memory cache every 5s
 
 Run:
@@ -15,6 +17,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from datetime import datetime
@@ -28,6 +31,8 @@ from dash import Dash, Input, Output, State, dcc, html
 # Allow running as "python -m src.dashboard" from project root
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from src.cell_history import (build_tape, cell_key, latest_snapshot,
+                                  quantize)
     from src.compute_loop import ComputeLoop
     from src.data_feed import make_feed
     from src.flow_confidence import assess_confidence, sirius_confidence
@@ -43,6 +48,8 @@ if __package__ in (None, ""):
     )
     import config as app_config
 else:
+    from .cell_history import (build_tape, cell_key, latest_snapshot,
+                               quantize)
     from .compute_loop import ComputeLoop
     from .data_feed import make_feed
     from .flow_confidence import assess_confidence, sirius_confidence
@@ -99,70 +106,33 @@ YELLOW = "#ffd60a"
 
 
 # ════════════════════════════════════════════════════════════════════
-#  HEATMAP PALETTES — user-selectable, persisted in localStorage
-#  Diverging scales: index 0 = strongest NEGATIVE GEX, 1.0 = strongest
+#  HEATMAP PALETTE — Nebula, and only Nebula.
+#  Diverging scale: index 0 = strongest NEGATIVE GEX, 1.0 = strongest
 #  POSITIVE. Zero is fully transparent so empty cells read as bare
 #  glass and the populated tiles appear to float ("liquid" signature).
+#
+#  This used to be a four-way picker (Aurora / Solar / Ion alongside it),
+#  persisted to localStorage. It is now a constant: one board, one scale,
+#  one thing for a reader to learn. Nothing downstream picks a palette, so
+#  `pal` is threaded from here rather than from a callback input.
 # ════════════════════════════════════════════════════════════════════
-PALETTES = {
-    "nebula": dict(
-        label="Nebula",
-        neg="#ff3d9e", pos="#45e3ff", accent="#8ceeff",
-        scale=[
-            [0.00, "#ff3d9e"],
-            [0.18, "rgba(216,42,128,0.92)"],
-            [0.40, "rgba(140,30,92,0.45)"],
-            [0.50, "rgba(10,12,24,0.0)"],
-            [0.60, "rgba(18,92,122,0.45)"],
-            [0.82, "rgba(36,176,216,0.92)"],
-            [1.00, "#45e3ff"],
-        ],
-    ),
-    "aurora": dict(
-        label="Aurora",
-        neg="#b18cff", pos="#3ef2ae", accent="#7dffd4",
-        scale=[
-            [0.00, "#b18cff"],
-            [0.18, "rgba(139,108,250,0.92)"],
-            [0.40, "rgba(92,70,190,0.45)"],
-            [0.50, "rgba(10,12,24,0.0)"],
-            [0.60, "rgba(18,116,88,0.45)"],
-            [0.82, "rgba(34,200,150,0.92)"],
-            [1.00, "#3ef2ae"],
-        ],
-    ),
-    "solar": dict(
-        label="Solar",
-        neg="#ff5249", pos="#ffb340", accent="#ffd08a",
-        scale=[
-            [0.00, "#ff5249"],
-            [0.18, "rgba(214,62,52,0.92)"],
-            [0.40, "rgba(140,42,34,0.45)"],
-            [0.50, "rgba(10,12,24,0.0)"],
-            [0.60, "rgba(150,86,18,0.45)"],
-            [0.82, "rgba(232,142,40,0.92)"],
-            [1.00, "#ffb340"],
-        ],
-    ),
-    "ion": dict(
-        label="Ion",
-        neg="#ff6b63", pos="#3ddc84", accent="#86ffc2",
-        scale=[
-            [0.00, "#ff6b63"],
-            [0.18, "rgba(220,70,62,0.92)"],
-            [0.40, "rgba(142,44,40,0.45)"],
-            [0.50, "rgba(10,12,24,0.0)"],
-            [0.60, "rgba(22,120,70,0.45)"],
-            [0.82, "rgba(40,196,116,0.92)"],
-            [1.00, "#3ddc84"],
-        ],
-    ),
-}
-DEFAULT_PALETTE = "nebula"
-
-
-def _palette(key: str) -> dict:
-    return PALETTES.get(key, PALETTES[DEFAULT_PALETTE])
+# NOTE: the in-terminal copy now names these two colours outright ("cyan
+# pins, magenta accelerates" — reading guide + GEX blurb). That is only safe
+# because the scale is fixed; if this ever becomes a setting again, that copy
+# has to go back to naming the SIGN instead.
+PALETTE = dict(
+    label="Nebula",
+    neg="#ff3d9e", pos="#45e3ff", accent="#8ceeff",
+    scale=[
+        [0.00, "#ff3d9e"],
+        [0.18, "rgba(216,42,128,0.92)"],
+        [0.40, "rgba(140,30,92,0.45)"],
+        [0.50, "rgba(10,12,24,0.0)"],
+        [0.60, "rgba(18,92,122,0.45)"],
+        [0.82, "rgba(36,176,216,0.92)"],
+        [1.00, "#45e3ff"],
+    ],
+)
 
 
 def _hex_to_rgba(hex_color: str, alpha: float) -> str:
@@ -181,7 +151,7 @@ MODE_LABELS = {
 # One-line explanation of each view mode — shown under the control deck
 # and in the /learn page. Palette-neutral wording (colors are themeable).
 MODE_BLURBS = {
-    "gex": "Raw dealer gamma exposure — where dealers will hedge as price moves. Bright positive cells pin price; bright negative cells repel it.",
+    "gex": "Raw dealer gamma exposure — where dealers will hedge as price moves. Bright cyan cells pin price; bright magenta cells accelerate it.",
     "gex_norm": "GEX scaled by √T to even out 0DTE dominance. Use in the morning to see longer-dated structure.",
     "vex": "Vanna exposure — dealer hedges driven by volatility changes. Aligns with GEX on conviction days, fights it on whipsaw days.",
     "color": "∂Γ/∂t — rate of gamma growth into expiry. Spikes mark strikes about to become magnetic into the close.",
@@ -311,11 +281,10 @@ def _hoverlabel() -> dict:
 # ── Adaptive cell-label color ───────────────────────────────────────
 # A go.Heatmap's textfont.color takes only ONE color in Plotly 6.x (a 2D
 # array is rejected on validation), and near-white labels wash out on the
-# bright tiles of the lighter palettes (Solar amber, the cyan/emerald
-# positive ends). So we render the dollar labels ourselves as annotations,
-# choosing dark ink on bright tiles and starlight on faint ones — readable
-# contrast on every palette. (Vijay: "white text on some styles is hard to
-# read.")
+# bright tiles at either end of the scale. So we render the dollar labels
+# ourselves as annotations, choosing dark ink on bright tiles and starlight
+# on faint ones — readable contrast at every intensity. (Vijay: "white text
+# on some styles is hard to read.")
 _TEXT_DARK = "#0a1420"
 _TEXT_LIGHT = "rgba(234,242,255,0.95)"
 
@@ -328,7 +297,7 @@ def _luminance(hex_color: str) -> float:
 
 def _label_color(v: float, vmax: float, pos_lum: float, neg_lum: float) -> str:
     """Dark ink once the displayed tile is light enough to wash out white
-    text. A cell's tile ≈ the palette's pos/neg endpoint at an intensity
+    text. A cell's tile ≈ the scale's pos/neg endpoint at an intensity
     ∝ |v|/vmax over the near-black board, so its effective luminance ≈
     endpoint_luminance × intensity; crossing ~0.5 flips to dark ink."""
     intensity = min(abs(v) / vmax, 1.0) if vmax > 0 else 0.0
@@ -396,16 +365,21 @@ def _empty_figure(message: str = "PRIMING CACHE — first data in ~15s") -> go.F
     return fig
 
 
-def _build_heatmap_figure(
-    grid: GEXGrid,
-    nodes: NodeMap,
-    mode: str = "gex",
-    palette: str = DEFAULT_PALETTE,
-) -> go.Figure:
-    pal = _palette(palette)
-    if grid is None or not grid.cells:
-        return _empty_figure()
+def _format_exp(e: str) -> str:
+    """Expiry header, compact: 2026-08-26 → "Aug 26"."""
+    try:
+        return datetime.fromisoformat(e).strftime("%b %-d")
+    except Exception:
+        return e
 
+
+def _visible_board(grid: GEXGrid, mode: str):
+    """The board exactly as drawn: (matrix, strikes, expiries, x/y labels).
+
+    The trim lives here rather than inline in the figure builder because the
+    hover tape has to cover the SAME cells the figure shows — two copies of
+    this arithmetic would drift apart the first time either window changes.
+    """
     mat, strikes, expiries = grid.as_matrix(mode)
 
     # Trim to ±3% window around spot for readability. VIX is exempt: its
@@ -424,14 +398,36 @@ def _build_heatmap_figure(
         expiries = expiries[:6]
         mat = mat[:, :6]
 
-    # Format expiry headers as MM-DD for compactness
-    def _format_exp(e: str) -> str:
-        try:
-            return datetime.fromisoformat(e).strftime("%b %-d")
-        except Exception:
-            return e
-    expiry_labels = [_format_exp(e) for e in expiries]
-    strike_labels = [f"{s:g}" for s in strikes]
+    return mat, strikes, expiries, [f"{s:g}" for s in strikes], [
+        _format_exp(e) for e in expiries
+    ]
+
+
+def _build_heatmap_figure(
+    grid: GEXGrid,
+    nodes: NodeMap,
+    mode: str = "gex",
+    tape: bool = False,
+) -> go.Figure:
+    pal = PALETTE
+    if grid is None or not grid.cells:
+        return _empty_figure()
+
+    mat, strikes, expiries, strike_labels, expiry_labels = _visible_board(grid, mode)
+
+    # With the tape on, the strike card is the only thing that appears on
+    # hover, so the native tooltips are switched off: hoverinfo="none" draws
+    # no label while STILL firing the hover event (unlike "skip", which kills
+    # the event and the card with it).
+    #
+    # The hovertemplates have to go with it. In Plotly.js a hovertemplate
+    # OVERRIDES hoverinfo — set both and the label renders anyway, which is
+    # how the old tooltips ended up drawing underneath the card. Everything
+    # they carried (value, the sign caveat, the Star Node) is in the card.
+    _hoverinfo = "none" if tape else None
+
+    def _ht(template):
+        return None if tape else template
 
     # Apply the cube-root color transform to the z-matrix so tiny cells
     # still show visible color. Text labels keep the real dollar values.
@@ -471,7 +467,8 @@ def _build_heatmap_figure(
             # actual values.
             showticklabels=False,
         ),
-        hovertemplate=(
+        hoverinfo=_hoverinfo,
+        hovertemplate=_ht(
             "STRIKE  %{y}<br>"
             "EXPIRY  %{x}<br>"
             f"{mode_label.upper()}    $%{{customdata:,.1f}}K"
@@ -521,7 +518,8 @@ def _build_heatmap_figure(
                 marker=dict(size=30, color="rgba(0,0,0,0)"),
                 name="Star Node",
                 showlegend=False,
-                hovertemplate=(
+                hoverinfo=_hoverinfo,
+                hovertemplate=_ht(
                     f"<b>★ STAR NODE</b><br>"
                     f"STRIKE  {nodes.sirius.strike}<br>"
                     f"EXPIRY  {nodes.sirius.expiry}<br>"
@@ -559,7 +557,8 @@ def _build_heatmap_figure(
                     name="sign uncertain",
                     showlegend=False,
                     customdata=lhover,
-                    hovertemplate="%{customdata}<extra></extra>",
+                    hoverinfo=_hoverinfo,
+                    hovertemplate=_ht("%{customdata}<extra></extra>"),
                 )
             )
 
@@ -624,16 +623,140 @@ def _build_heatmap_figure(
         # Persist the viewer's zoom/pan across the 5s poll refresh. Keyed to
         # ticker so switching instrument resets the view, but a refresh of the
         # SAME ticker keeps you zoomed in (Vijay: "every refresh zooms me
-        # out"). Mode/palette changes keep the zoom — same axes.
+        # out"). Mode changes keep the zoom — same axes.
         uirevision=grid.ticker,
     )
     return fig
 
 
-def _build_orion_figure(cache, mode: str = "gex", palette: str = DEFAULT_PALETTE) -> go.Figure:
+# ── Strike tape ─────────────────────────────────────────────────────
+# The hover card. Everything it draws is shipped once per poll and rendered
+# in the browser (assets/tape.js), so moving the mouse across the board costs
+# ZERO server round-trips — the same reason the visibility heartbeat is
+# clientside. A hover-triggered server callback would fire dozens of times a
+# minute and put Vercel's Active CPU budget right back where it was.
+#
+# POLARIS_TAPE=0 falls back to Plotly's native tooltips.
+TAPE_ENABLED = os.environ.get("POLARIS_TAPE", "1").strip().lower() not in (
+    "0", "false", "no", "off",
+)
+
+# The store only gains rows once a flush interval (~69s) but the board polls
+# every 15s, so the history read is memoized. The memo is keyed on the store's
+# NEWEST ROW, not on a clock: a plain TTL would let the cached series fall up
+# to a TTL behind the payload's own timestamp, and the card — which measures
+# its lookbacks from that timestamp — would report the 1-minute row as two
+# minutes old on every board. One indexed MAX(ts) per poll costs ~1ms and
+# keeps the two exactly in step.
+_tape_memo: dict[tuple, dict] = {}
+
+
+def _cell_history(db_path, ticker, mode, strikes, expiries) -> dict:
+    """`build_tape`, rebuilt only when the store has something new to say.
+
+    Never raises: a missing or locked store costs the card its history, not
+    the board."""
+    try:
+        latest = latest_snapshot(db_path, ticker)
+    except Exception:
+        latest = None
+    key = (str(db_path), ticker, mode, strikes[0], strikes[-1],
+           len(strikes), tuple(expiries), latest)
+    hit = _tape_memo.get(key)
+    if hit is not None:
+        return hit
+    try:
+        tape = build_tape(db_path, ticker, mode, strikes, expiries, now=latest)
+    except Exception as e:            # sqlite locked, schema drift, …
+        print(f"[tape] history unavailable for {ticker}/{mode}: {e}", flush=True)
+        tape = {"cells": {}, "stored": False, "reason": "error"}
+    _tape_memo[key] = tape
+    # The key carries the store's newest row, so a fresh entry lands on every
+    # flush. Evict oldest-first (dicts keep insertion order) rather than
+    # clearing outright — a wholesale clear would drop the OTHER tickers'
+    # tapes too and make the next poll on each of them pay a rebuild.
+    while len(_tape_memo) > 16:
+        _tape_memo.pop(next(iter(_tape_memo)))
+    return tape
+
+
+def _build_tape_payload(grid: GEXGrid, nodes: NodeMap, mode: str,
+                        ticker: str, db_path=None) -> dict:
+    """Everything the hover card needs for the whole visible board.
+
+    Live values come from the cache; the history under them comes from
+    gex_snapshots. Both are keyed by the LABEL pair Plotly reports on hover
+    ("765|Aug 26"), so the browser can go straight from a hover event to a
+    card with no lookup table of its own.
+    """
+    if grid is None or not grid.cells:
+        return {"ok": False, "cells": {}}
+
+    mat, strikes, expiries, strike_labels, expiry_labels = _visible_board(grid, mode)
+    tape = _cell_history(db_path, ticker, mode, strikes, expiries) if db_path else {}
+    hist = tape.get("cells", {})
+
+    cmap = assess_confidence(grid) if mode == "gex" else None
+    star = None
+    if nodes is not None and nodes.sirius is not None:
+        sy, sx = f"{nodes.sirius.strike:g}", _format_exp(nodes.sirius.expiry)
+        if sy in strike_labels and sx in expiry_labels:
+            star = f"{sy}|{sx}"
+
+    today = datetime.now().date()
+    exp_meta = {}
+    for e, label in zip(expiries, expiry_labels):
+        try:
+            dte = max((datetime.fromisoformat(e).date() - today).days, 0)
+        except Exception:
+            dte = None
+        exp_meta[label] = {"iso": e, "dte": dte}
+
+    cells: dict[str, dict] = {}
+    vmax = 0.0
+    for i, strike in enumerate(strikes):
+        for j, expiry in enumerate(expiries):
+            v = float(mat[i, j])
+            vmax = max(vmax, abs(v))
+            entry: dict = {"v": quantize(v)}
+            h = hist.get(cell_key(strike, expiry))
+            if h:
+                entry["s"] = h["s"]      # sparkline values, aligned to tape["t"]
+                entry["x"] = h["e"]      # 1h / 4h / 1d anchors
+            if cmap is not None:
+                cc = cmap.get(strike, expiry)
+                if cc is not None and cc.is_low:
+                    entry["w"] = list(cc.reasons)
+            cells[f"{strike_labels[i]}|{expiry_labels[j]}"] = entry
+
+    return {
+        "ok": True,
+        "ticker": ticker,
+        "mode": mode,
+        "modeLabel": MODE_LABELS.get(mode, mode.upper()),
+        "spot": round(grid.spot, 4),
+        "ts": grid.timestamp,
+        "served": int(time.time()),
+        "vmax": round(vmax, 2),
+        "star": star,
+        "exp": exp_meta,
+        "cells": cells,
+        # History axis — absolute epoch seconds, plus the clock the server was
+        # reading when it built them (the browser corrects its own skew
+        # against `served` before merging in what it recorded itself).
+        "t": tape.get("t", []),
+        "lags": tape.get("lags", []),
+        "labels": tape.get("labels", []),
+        "extTs": tape.get("ext_ts", []),
+        "stored": bool(tape.get("stored")),
+        "reason": tape.get("reason"),
+    }
+
+
+def _build_orion_figure(cache, mode: str = "gex") -> go.Figure:
     from plotly.subplots import make_subplots
 
-    pal = _palette(palette)
+    pal = PALETTE
     orion_tickers = ["SPY", "SPX", "QQQ", "NVDA", "VIX"]
     fig = make_subplots(
         rows=1,
@@ -841,10 +964,12 @@ def _reading_guide():
                         html.Div("THE MAP", className="g-head"),
                         item("Grid", "Strikes stack vertically; expiries run "
                                      "left → right, nearest first."),
-                        item("Color", "Brightness = how much dealer gamma sits "
-                                      "there. One side pins price, the other "
-                                      "repels it — the palette legends the two "
-                                      "directions."),
+                        item("Cyan", "Positive gamma. Dealers hedge AGAINST "
+                                     "the move here, so price gets pinned. "
+                                     "Brighter = more of it."),
+                        item("Magenta", "Negative gamma. Dealers hedge WITH the "
+                                        "move, so price accelerates through. "
+                                        "Brighter = more of it."),
                         item("★ Star Node", "The bracketed cell: the single "
                                             "strongest magnet. Price tends to "
                                             "gravitate here by expiry."),
@@ -855,6 +980,12 @@ def _reading_guide():
                                              "is unreliable — churned by same-day "
                                              "flow or split 50/50 calls vs puts. "
                                              "Trust the wall, not its + / − here."),
+                        item("Hover a cell", "The strike card: its line over the "
+                                             "last half hour, and how far it "
+                                             "moved over 1/5/10/15 min and "
+                                             "1h/4h/1d. HOT = built fast, "
+                                             "FADING = bleeding out, SIGN FLIP = "
+                                             "it crossed zero."),
                     ]),
                     html.Div(className="g-col", children=[
                         html.Div("THE VIEWS", className="g-head"),
@@ -872,20 +1003,24 @@ def _reading_guide():
                     html.Div(className="g-col g-col-wide", children=[
                         html.Div("WHAT TO LOOK FOR", className="g-head"),
                         html.Ul(className="g-cues", children=[
-                            html.Li("Bright same-side walls just above AND below "
-                                    "spot → price boxed in; expect a pinned, "
+                            html.Li("Bright cyan just above AND below spot → "
+                                    "price boxed in; expect a pinned, "
                                     "range-bound day."),
                             html.Li("Star Node sitting away from spot with a "
                                     "clear path → a magnet pulling price toward "
                                     "it."),
-                            html.Li("A sign flip right at spot → the "
-                                    "acceleration zone; momentum tends to run "
-                                    "if price breaks through."),
+                            html.Li("Cyan flipping to magenta right at spot → "
+                                    "the acceleration zone; momentum tends to "
+                                    "run if price breaks through."),
                             html.Li("ΔΓ/Δt lighting up a strike that was quiet → "
                                     "it's turning magnetic into the close. "
                                     "Watch it."),
                             html.Li("A 'Fresh' Star Node state → it just moved. "
                                     "Don't trust the new level until it holds."),
+                            html.Li("A big wall that's flat on the tape has been "
+                                    "there all session; one marked HOT was just "
+                                    "built. Same size on the map, different "
+                                    "conviction behind it."),
                         ]),
                     ]),
                 ]),
@@ -899,7 +1034,13 @@ def _reading_guide():
 # --------------- App layout ---------------
 
 def create_app(cache, tickers: list[str], gate_auth: bool = True,
-               poll_seconds: int | None = None, auth_mode: str = "code") -> Dash:
+               poll_seconds: int | None = None, auth_mode: str = "code",
+               db_path=None) -> Dash:
+    # The tape reads history straight out of the snapshot store. On the Mac
+    # that's the DB the writer thread has been filling since June; serverless
+    # has no such file, `cell_history` finds nothing, and the card falls back
+    # to what the browser records while you watch.
+    db_path = app_config.DB_PATH if db_path is None else db_path
     # Assets folder is at project root, not next to this script
     assets_path = str(Path(__file__).resolve().parents[1] / "assets")
     app = Dash(__name__, title="Polaris", assets_folder=assets_path)
@@ -974,27 +1115,6 @@ def create_app(cache, tickers: list[str], gate_auth: bool = True,
                 ),
             ],
         )
-
-    palette_options = [
-        {
-            "label": html.Span(
-                [
-                    html.Span(
-                        className="pal-dot",
-                        style={
-                            "background": (
-                                f"linear-gradient(135deg, {p['neg']}, {p['pos']})"
-                            ),
-                        },
-                    ),
-                    html.Span(p["label"]),
-                ],
-                style={"display": "inline-flex", "alignItems": "center", "gap": "7px"},
-            ),
-            "value": key,
-        }
-        for key, p in PALETTES.items()
-    ]
 
     app.layout = html.Div(
         className="app-root",
@@ -1075,12 +1195,6 @@ def create_app(cache, tickers: list[str], gate_auth: bool = True,
                                         "gex",
                                         label="View",
                                     ),
-                                    _seg(
-                                        "palette-select",
-                                        palette_options,
-                                        DEFAULT_PALETTE,
-                                        label="Palette",
-                                    ),
                                 ],
                             ),
                             html.Div(id="mode-blurb", className="deck-blurb"),
@@ -1105,6 +1219,7 @@ def create_app(cache, tickers: list[str], gate_auth: bool = True,
                             dcc.Graph(
                                 id="heatmap-graph",
                                 className="board-graph",
+                                clear_on_unhover=True,
                                 config={
                                     "displaylogo": False,
                                     "displayModeBar": "hover",
@@ -1119,8 +1234,14 @@ def create_app(cache, tickers: list[str], gate_auth: bool = True,
                 ],
             ),
 
-            # Palette persistence (localStorage) + poll
-            dcc.Store(id="palette-store", storage_type="local"),
+            # The strike tape: one floating card, drawn by assets/tape.js from
+            # `tape-store`. It lives out here rather than inside the board panel
+            # because `.panel` clips its overflow — and it is fixed-positioned,
+            # so its place in the DOM costs it nothing.
+            html.Div(id="cell-tape", className="tape", **{"data-open": "0"}),
+            dcc.Store(id="tape-store"),
+            dcc.Store(id="tape-sink"),
+
             dcc.Interval(id="poll",
                          interval=(poll_seconds or app_config.DASHBOARD_POLL) * 1000,
                          n_intervals=0),
@@ -1169,9 +1290,9 @@ def create_app(cache, tickers: list[str], gate_auth: bool = True,
             else "banner banner-offline"
         return html.Div(className=cls, children=status.message)
 
-    def _build_header_cells(grid, nodes, reshuffle_age, palette=DEFAULT_PALETTE):
+    def _build_header_cells(grid, nodes, reshuffle_age):
         """The stat-chip row: ticker, spot, Star Node, value, updated."""
-        pal = _palette(palette)
+        pal = PALETTE
         if grid is None:
             return [
                 _chip("Spot", "—", dim=True),
@@ -1212,10 +1333,9 @@ def create_app(cache, tickers: list[str], gate_auth: bool = True,
         chips.append(_chip("Updated", ts_str, value_style={"color": INK_2}))
         return chips
 
-    def _build_node_row(grid, nodes, mode, ticker, reshuffle_age=None,
-                        palette=DEFAULT_PALETTE):
+    def _build_node_row(grid, nodes, mode, ticker, reshuffle_age=None):
         """Bottom-of-board pill row: Star Node, value, reshuffle, gatekeepers."""
-        pal = _palette(palette)
+        pal = PALETTE
         parts = [
             html.Span(
                 className="np",
@@ -1282,21 +1402,6 @@ def create_app(cache, tickers: list[str], gate_auth: bool = True,
 
     # ── Palette persistence: localStorage ↔ control sync ───────────
     @app.callback(
-        Output("palette-select", "value"),
-        Input("palette-store", "data"),
-    )
-    def _restore_palette(saved):
-        return saved if saved in PALETTES else DEFAULT_PALETTE
-
-    @app.callback(
-        Output("palette-store", "data"),
-        Input("palette-select", "value"),
-        prevent_initial_call=True,
-    )
-    def _persist_palette(value):
-        return value
-
-    @app.callback(
         [
             Output("heatmap-graph", "figure"),
             Output("freshness-badge", "children"),
@@ -1304,22 +1409,22 @@ def create_app(cache, tickers: list[str], gate_auth: bool = True,
             Output("header-cells", "children"),
             Output("node-summary", "children"),
             Output("mode-blurb", "children"),
+            Output("tape-store", "data"),
         ],
         [
             Input("poll", "n_intervals"),
             Input("ticker-select", "value"),
             Input("mode-select", "value"),
-            Input("palette-select", "value"),
         ],
     )
-    def _update(_n, ticker, mode, palette):
+    def _update(_n, ticker, mode):
         latest_ts = latest_cache_timestamp(cache)
         status = evaluate_freshness(latest_ts)
         banner = _build_stale_banner(status)
         blurb = MODE_BLURBS.get(mode, "")
 
         if ticker == "ORION":
-            fig = _build_orion_figure(cache, mode, palette)
+            fig = _build_orion_figure(cache, mode)
             # Use first available ticker for header info in Orion mode
             for t in ("SPY", "SPX", "QQQ", "NVDA", "VIX"):
                 grid = cache.get_grid(t)
@@ -1328,21 +1433,25 @@ def create_app(cache, tickers: list[str], gate_auth: bool = True,
                     break
             badge = _build_freshness_badge(status, cache.get_source(t))
             reshuffle_age = cache.sirius_reshuffle_age(t) if grid else None
-            header = _build_header_cells(grid, nodes, reshuffle_age, palette)
-            node_row = _build_node_row(grid, nodes, mode, "ORION",
-                                       reshuffle_age, palette)
-            return fig, badge, banner, header, node_row, blurb
+            header = _build_header_cells(grid, nodes, reshuffle_age)
+            node_row = _build_node_row(grid, nodes, mode, "ORION", reshuffle_age)
+            # No tape in ORION: five boards share one figure, and a card
+            # keyed on strike labels alone can't tell SPY 765 from SPX 765.
+            return fig, badge, banner, header, node_row, blurb, {"ok": False}
 
         grid = cache.get_grid(ticker)
         nodes = cache.get_nodes(ticker)
         badge = _build_freshness_badge(status, cache.get_source(ticker))
         reshuffle_age = cache.sirius_reshuffle_age(ticker)
-        fig = _build_heatmap_figure(grid, nodes, mode, palette)
-        header = _build_header_cells(grid, nodes, reshuffle_age, palette)
-        node_row = _build_node_row(grid, nodes, mode, ticker,
-                                   reshuffle_age, palette)
+        fig = _build_heatmap_figure(grid, nodes, mode, tape=TAPE_ENABLED)
+        header = _build_header_cells(grid, nodes, reshuffle_age)
+        node_row = _build_node_row(grid, nodes, mode, ticker, reshuffle_age)
+        tape = (
+            _build_tape_payload(grid, nodes, mode, ticker, db_path)
+            if TAPE_ENABLED else {"ok": False}
+        )
 
-        return fig, badge, banner, header, node_row, blurb
+        return fig, badge, banner, header, node_row, blurb, tape
 
     # Gate the server poll on tab visibility. `visbeat` is a clientside-only
     # interval, so this callback runs in the browser and costs ZERO serverless
@@ -1353,6 +1462,23 @@ def create_app(cache, tickers: list[str], gate_auth: bool = True,
         "function(_n){ return document.hidden; }",
         Output("poll", "disabled"),
         Input("visbeat", "n_intervals"),
+    )
+
+    # Strike tape — one clientside callback doing both halves (assets/tape.js):
+    #   record — each poll, append the board to a ring buffer, so a terminal
+    #            with no snapshot store behind it still grows a tape while you
+    #            watch it (deduped on the payload timestamp, so re-running it
+    #            on a hover event is free)
+    #   render — hover event → card, drawn from data already in the page
+    # Neither costs a server round-trip, which is the whole point: hover fires
+    # dozens of times a minute, and a server-side hover callback would put
+    # Vercel's Active CPU budget right back where it was. `tape-sink` is a
+    # sink — the real work is DOM-side, so the callback returns no_update.
+    app.clientside_callback(
+        "function(hover, tape){ return window.polarisTape.tick(hover, tape); }",
+        Output("tape-sink", "data"),
+        Input("heatmap-graph", "hoverData"),
+        Input("tape-store", "data"),
     )
 
     return app
