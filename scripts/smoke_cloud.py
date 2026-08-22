@@ -55,18 +55,34 @@ print("4) WSGI request to '/' (Flask test client) …", flush=True)
 client = mod.server.test_client()
 t0 = time.time()
 r = client.get("/")
+print(f"   status={r.status_code}  →  {r.headers.get('Location', '')}  {time.time()-t0:.2f}s")
+# The cloud terminal signs members in with their Astraios account, so an
+# anonymous '/' is SUPPOSED to bounce to the sign-in card. Serving the board
+# to a stranger would be the bug.
+assert r.status_code == 302, f"expected a redirect to /login, got {r.status_code}"
+assert "/login" in r.headers.get("Location", ""), "'/' redirected somewhere other than /login"
+t0 = time.time()
+r = client.get("/login")
 body = r.get_data(as_text=True)
-print(f"   status={r.status_code}  bytes={len(body)}  {time.time()-t0:.2f}s")
-assert r.status_code == 200, f"expected 200, got {r.status_code}"
+print(f"   /login status={r.status_code}  bytes={len(body)}  {time.time()-t0:.2f}s")
+assert r.status_code == 200, f"expected 200 from /login, got {r.status_code}"
 assert "Polaris" in body or "polaris" in body, "no Polaris marker in HTML"
-# Dash serves a bootstrap shell; confirm the react entry + our assets link exist.
-assert "react" in body.lower() or "_dash" in body, "no Dash bootstrap in HTML"
-print("   OK  Dash shell served, contains Polaris marker")
+print("   OK  sign-in card served, contains Polaris marker")
 
-print("5) /learn Academy route (should 302 → Nexus academy) …", flush=True)
+print("5) /learn Academy route …", flush=True)
+# Anonymous, it hits the same gate everything else does.
+r2 = client.get("/learn")
+print(f"   anonymous /learn status={r2.status_code}  →  {r2.headers.get('Location', '')}")
+assert r2.status_code == 302 and "/login" in r2.headers.get("Location", ""), \
+    "anonymous /learn should bounce to the sign-in card"
+# Signed in, it forwards to the Academy on the Nexus site.
+with client.session_transaction() as sess:
+    sess["authenticated"] = True
+    sess["method"] = "astraios"
+    sess["ts"] = int(time.time())
 r2 = client.get("/learn")
 loc = r2.headers.get("Location", "")
-print(f"   /learn status={r2.status_code}  →  {loc}")
+print(f"   signed-in /learn status={r2.status_code}  →  {loc}")
 assert r2.status_code == 302 and "astraiosalgo.com/academy" in loc, "learn redirect wrong"
 
 print("\nALL SMOKE CHECKS PASSED ✅")
