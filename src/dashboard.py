@@ -373,12 +373,13 @@ def _format_exp(e: str) -> str:
         return e
 
 
-def _visible_board(grid: GEXGrid, mode: str):
+def _visible_board(grid: GEXGrid, mode: str, max_expiries: int = 6):
     """The board exactly as drawn: (matrix, strikes, expiries, x/y labels).
 
     The trim lives here rather than inline in the figure builder because the
     hover tape has to cover the SAME cells the figure shows — two copies of
     this arithmetic would drift apart the first time either window changes.
+    ORION passes max_expiries=4: five panels side by side are narrow.
     """
     mat, strikes, expiries = grid.as_matrix(mode)
 
@@ -393,10 +394,10 @@ def _visible_board(grid: GEXGrid, mode: str):
             strikes = [strikes[i] for i in keep_strikes]
             mat = mat[keep_strikes, :]
 
-    # Limit to first 6 expiries for readability (Skylit shows 5)
-    if len(expiries) > 6:
-        expiries = expiries[:6]
-        mat = mat[:, :6]
+    # Limit expiries for readability (Skylit shows 5)
+    if len(expiries) > max_expiries:
+        expiries = expiries[:max_expiries]
+        mat = mat[:, :max_expiries]
 
     return mat, strikes, expiries, [f"{s:g}" for s in strikes], [
         _format_exp(e) for e in expiries
@@ -641,6 +642,27 @@ TAPE_ENABLED = os.environ.get("POLARIS_TAPE", "1").strip().lower() not in (
     "0", "false", "no", "off",
 )
 
+# HOT / FADING thresholds. These live on the SERVER and ride out in the payload
+# rather than sitting as constants in tape.js, so they can be retuned with an
+# env var and a restart instead of a JS edit and a redeploy.
+#
+# Calibrated against real sessions with scripts/tape_calibrate.py rather than
+# by eye — 5 days of market hours across SPY/SPX/QQQ put +35% at roughly the
+# 95th-99th percentile of 5-minute moves, firing on 0.37-0.55 cells per board.
+# Rare enough to mean something, often enough to see. Re-run that script before
+# changing these.
+ORION_TAPE_POINTS = int(os.environ.get("POLARIS_ORION_TAPE_POINTS", "12"))
+# ORION rebuilds its history far less often than the single board. Five boards
+# means five reads, and the wide ones (SPX at 92 strikes, VIX at 48) dominate:
+# ~1.1s all told, which is not something to spend every flush on the heaviest
+# view on the site. Coarsening the memo key to a 5-minute bucket pays that once
+# per bucket instead. Nothing is lost in the gap — live values still refresh on
+# every poll, and the browser's ring buffer is appending the recent end of the
+# series anyway. The DB is there for DEPTH, not recency.
+ORION_TAPE_BUCKET = int(os.environ.get("POLARIS_ORION_TAPE_BUCKET", "300"))
+TAPE_HOT_PCT = float(os.environ.get("POLARIS_TAPE_HOT_PCT", "35"))
+TAPE_HOT_FLOOR = float(os.environ.get("POLARIS_TAPE_HOT_FLOOR", "0.08"))
+
 # The store only gains rows once a flush interval (~69s) but the board polls
 # every 15s, so the history read is memoized. The memo is keyed on the store's
 # NEWEST ROW, not on a clock: a plain TTL would let the cached series fall up
@@ -651,8 +673,12 @@ TAPE_ENABLED = os.environ.get("POLARIS_TAPE", "1").strip().lower() not in (
 _tape_memo: dict[tuple, dict] = {}
 
 
-def _cell_history(db_path, ticker, mode, strikes, expiries) -> dict:
+def _cell_history(db_path, ticker, mode, strikes, expiries,
+                  max_points=None, bucket=0) -> dict:
     """`build_tape`, rebuilt only when the store has something new to say.
+
+    `bucket` coarsens the freshness key to that many seconds, so a caller that
+    doesn't need the newest row every time rebuilds on its own slower cadence.
 
     Never raises: a missing or locked store costs the card its history, not
     the board."""
@@ -660,13 +686,18 @@ def _cell_history(db_path, ticker, mode, strikes, expiries) -> dict:
         latest = latest_snapshot(db_path, ticker)
     except Exception:
         latest = None
+    stamp = latest
+    if latest and bucket > 0:
+        stamp = (latest // bucket) * bucket
     key = (str(db_path), ticker, mode, strikes[0], strikes[-1],
-           len(strikes), tuple(expiries), latest)
+           len(strikes), tuple(expiries), stamp, max_points)
     hit = _tape_memo.get(key)
     if hit is not None:
         return hit
     try:
-        tape = build_tape(db_path, ticker, mode, strikes, expiries, now=latest)
+        kw = {} if max_points is None else {"max_points": max_points}
+        tape = build_tape(db_path, ticker, mode, strikes, expiries,
+                          now=latest, **kw)
     except Exception as e:            # sqlite locked, schema drift, …
         print(f"[tape] history unavailable for {ticker}/{mode}: {e}", flush=True)
         tape = {"cells": {}, "stored": False, "reason": "error"}
@@ -675,7 +706,7 @@ def _cell_history(db_path, ticker, mode, strikes, expiries) -> dict:
     # flush. Evict oldest-first (dicts keep insertion order) rather than
     # clearing outright — a wholesale clear would drop the OTHER tickers'
     # tapes too and make the next poll on each of them pay a rebuild.
-    while len(_tape_memo) > 16:
+    while len(_tape_memo) > 24:
         _tape_memo.pop(next(iter(_tape_memo)))
     return tape
 
@@ -750,14 +781,105 @@ def _build_tape_payload(grid: GEXGrid, nodes: NodeMap, mode: str,
         "extTs": tape.get("ext_ts", []),
         "stored": bool(tape.get("stored")),
         "reason": tape.get("reason"),
+        # Badge thresholds, server-side so they're tunable without a redeploy.
+        "hot": {"pct": TAPE_HOT_PCT, "floor": TAPE_HOT_FLOOR},
     }
 
 
-def _build_orion_figure(cache, mode: str = "gex") -> go.Figure:
+ORION_TICKERS = ["SPY", "SPX", "QQQ", "NVDA", "VIX"]
+
+
+def _build_orion_tape(cache, mode: str, curve_map: dict, db_path=None) -> dict:
+    """One tape covering all five ORION boards.
+
+    Cells are keyed "TICKER|strike|expiry" and `curves` maps Plotly's
+    curveNumber back to a ticker, which is the only way the card can tell
+    SPY 765 from SPX 765 when five panels share one figure.
+
+    The sparkline is deliberately coarser here (ORION_TAPE_POINTS) — this
+    envelope carries five boards instead of one, and ORION is already the
+    heaviest view on the site. The extended 1h/4h/1d anchors still come
+    through at full fidelity; they cost three values per cell, not thirty.
+    """
+    out: dict[str, dict] = {}
+    meta: dict[str, dict] = {}
+    t_axis: list[int] = []
+    lags: list = []
+    labels: list = []
+    ext_ts: list = []
+    stored = False
+    vmax = 0.0
+    served = int(time.time())
+    today = datetime.now().date()
+
+    for tkr in set(curve_map.values()):
+        grid = cache.get_grid(tkr)
+        if grid is None or not grid.cells:
+            continue
+        mat, strikes, expiries, s_labels, e_labels = _visible_board(
+            grid, mode, max_expiries=4
+        )
+        hist = {}
+        if db_path:
+            tp = _cell_history(db_path, tkr, mode, strikes, expiries,
+                               max_points=ORION_TAPE_POINTS,
+                               bucket=ORION_TAPE_BUCKET)
+            hist = tp.get("cells", {})
+            if tp.get("stored") and not t_axis:
+                t_axis, lags = tp.get("t", []), tp.get("lags", [])
+                labels, ext_ts = tp.get("labels", []), tp.get("ext_ts", [])
+                stored = True
+        for j, e in enumerate(expiries):
+            try:
+                dte = max((datetime.fromisoformat(e).date() - today).days, 0)
+            except Exception:
+                dte = None
+            meta[f"{tkr}|{e_labels[j]}"] = {"iso": e, "dte": dte}
+        for i, strike in enumerate(strikes):
+            for j, expiry in enumerate(expiries):
+                v = float(mat[i, j])
+                vmax = max(vmax, abs(v))
+                entry: dict = {"v": quantize(v)}
+                h = hist.get(cell_key(strike, expiry))
+                if h:
+                    entry["s"], entry["x"] = h["s"], h["e"]
+                out[f"{tkr}|{s_labels[i]}|{e_labels[j]}"] = entry
+
+    return {
+        "ok": bool(out),
+        "ticker": "ORION",
+        "mode": mode,
+        "modeLabel": MODE_LABELS.get(mode, mode.upper()),
+        "ts": int(latest_cache_timestamp(cache) or served),
+        "served": served,
+        "vmax": round(vmax, 2),
+        "star": None,
+        "exp": meta,
+        "cells": out,
+        "curves": {str(k): v for k, v in curve_map.items()},
+        "t": t_axis,
+        "lags": lags,
+        "labels": labels,
+        "extTs": ext_ts,
+        "stored": stored,
+        "reason": None if stored else "no-store",
+        "hot": {"pct": TAPE_HOT_PCT, "floor": TAPE_HOT_FLOOR},
+    }
+
+
+def _build_orion_figure(cache, mode: str = "gex", tape: bool = False):
+    """Returns (figure, curve_map).
+
+    `curve_map` is {trace index: ticker}. Five boards share one figure and
+    Plotly reports only a curveNumber on hover, so the card needs this to know
+    whether the "765" it was handed is SPY's or SPX's.
+    """
     from plotly.subplots import make_subplots
 
     pal = PALETTE
-    orion_tickers = ["SPY", "SPX", "QQQ", "NVDA", "VIX"]
+    orion_tickers = ORION_TICKERS
+    curve_map: dict[int, str] = {}
+    _hoverinfo = "none" if tape else None
     fig = make_subplots(
         rows=1,
         cols=len(orion_tickers),
@@ -776,25 +898,9 @@ def _build_orion_figure(cache, mode: str = "gex") -> go.Figure:
         nodes = cache.get_nodes(tkr)
         if grid is None or not grid.cells:
             continue
-        mat, strikes, expiries = grid.as_matrix(mode)
-
-        # Trim ±3% strike window (VIX exempt — its feed already windows wide
-        # for the far-OTM crash-hedge call walls).
-        spot = grid.spot
-        if tkr != "VIX":
-            lo, hi = spot * 0.97, spot * 1.03
-            keep = [i for i, s in enumerate(strikes) if lo <= s <= hi]
-            if keep:
-                strikes = [strikes[i] for i in keep]
-                mat = mat[keep, :]
-
-        # Limit expiries — 5 panels are narrow, keep the front 4
-        if len(expiries) > 4:
-            expiries = expiries[:4]
-            mat = mat[:, :4]
-
-        exp_labels = [_orion_format_exp(e) for e in expiries]
-        strike_labels = [f"{s:g}" for s in strikes]
+        mat, strikes, expiries, strike_labels, exp_labels = _visible_board(
+            grid, mode, max_expiries=4
+        )
 
         # Same cube-root color transform as the single-ticker view —
         # text labels keep raw dollars, z carries compressed magnitudes.
@@ -819,10 +925,16 @@ def _build_orion_figure(cache, mode: str = "gex") -> go.Figure:
                     if idx == 3 else None
                 ),
                 xgap=2, ygap=2,
-                hovertemplate=f"{tkr}<br>Strike %{{y}}<br>Expiry %{{x}}<br>{MODE_LABELS.get(mode, mode.upper())} $%{{customdata:.0f}}k<extra></extra>",
+                hoverinfo=_hoverinfo,
+                hovertemplate=None if tape else (
+                    f"{tkr}<br>Strike %{{y}}<br>Expiry %{{x}}<br>"
+                    f"{MODE_LABELS.get(mode, mode.upper())} "
+                    f"$%{{customdata:.0f}}k<extra></extra>"
+                ),
             ),
             row=1, col=idx,
         )
+        curve_map[len(fig.data) - 1] = tkr
         # Adaptive-contrast cell labels for this subplot (added AFTER the
         # subplot-title annotations so the title-styling loop below can skip
         # them by text).
@@ -883,7 +995,7 @@ def _build_orion_figure(cache, mode: str = "gex") -> go.Figure:
             showgrid=False, showline=False,
             row=1, col=i,
         )
-    return fig
+    return fig, curve_map
 
 
 # api/index.py (Vercel demo entry) still imports the pre-rename symbol.
@@ -1424,7 +1536,7 @@ def create_app(cache, tickers: list[str], gate_auth: bool = True,
         blurb = MODE_BLURBS.get(mode, "")
 
         if ticker == "ORION":
-            fig = _build_orion_figure(cache, mode)
+            fig, curve_map = _build_orion_figure(cache, mode, tape=TAPE_ENABLED)
             # Use first available ticker for header info in Orion mode
             for t in ("SPY", "SPX", "QQQ", "NVDA", "VIX"):
                 grid = cache.get_grid(t)
@@ -1435,9 +1547,11 @@ def create_app(cache, tickers: list[str], gate_auth: bool = True,
             reshuffle_age = cache.sirius_reshuffle_age(t) if grid else None
             header = _build_header_cells(grid, nodes, reshuffle_age)
             node_row = _build_node_row(grid, nodes, mode, "ORION", reshuffle_age)
-            # No tape in ORION: five boards share one figure, and a card
-            # keyed on strike labels alone can't tell SPY 765 from SPX 765.
-            return fig, badge, banner, header, node_row, blurb, {"ok": False}
+            tape = (
+                _build_orion_tape(cache, mode, curve_map, db_path)
+                if TAPE_ENABLED else {"ok": False}
+            )
+            return fig, badge, banner, header, node_row, blurb, tape
 
         grid = cache.get_grid(ticker)
         nodes = cache.get_nodes(ticker)

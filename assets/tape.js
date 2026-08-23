@@ -41,7 +41,9 @@
 
   // A cell counts as HOT only if it is both moving fast AND big enough to
   // matter on this board — otherwise a $2K cell doubling to $4K would out-
-  // shout the Star Node.
+  // shout the Star Node. The server sends both numbers (POLARIS_TAPE_HOT_PCT /
+  // _FLOOR) so they can be retuned without touching this file; these are the
+  // fallbacks for a payload that predates them.
   var HOT_PCT = 35;              // |5-min change| in percent
   var HOT_FLOOR = 0.08;          // ... and at least 8% of the board's largest cell
 
@@ -254,8 +256,10 @@
     var cell = tape.cells[key];
     if (!cell) return null;
     var parts = key.split("|");
-    var strike = parts[0], expLabel = parts[1];
-    var meta = (tape.exp || {})[expLabel] || {};
+    // "765|Aug 26" on a single board, "SPY|765|Aug 26" on ORION.
+    var owner = parts.length > 2 ? parts[0] : "";
+    var strike = parts[parts.length - 2], expLabel = parts[parts.length - 1];
+    var meta = (tape.exp || {})[(owner ? owner + "|" : "") + expLabel] || {};
     var series = seriesFor(tape, key);
     var now = tape.served;
     var cur = cell.v;
@@ -284,16 +288,20 @@
     var five = short[1].ch;
     var flipped = short.some(function (s) { return s.ch && s.ch.flip; });
 
+    var hotPct = (tape.hot && tape.hot.pct != null) ? tape.hot.pct : HOT_PCT;
+    var hotFloor = (tape.hot && tape.hot.floor != null) ? tape.hot.floor : HOT_FLOOR;
     var badges = "";
     if (tape.star === key) badges += '<span class="tape-badge star">★ STAR NODE</span>';
     if (flipped) badges += '<span class="tape-badge flip">SIGN FLIP</span>';
-    else if (five && five.pct !== null && Math.abs(cur) >= HOT_FLOOR * (tape.vmax || 0)) {
-      if (five.pct >= HOT_PCT) badges += '<span class="tape-badge hot">HOT</span>';
-      else if (five.pct <= -HOT_PCT) badges += '<span class="tape-badge fade">FADING</span>';
+    else if (five && five.pct !== null && Math.abs(cur) >= hotFloor * (tape.vmax || 0)) {
+      if (five.pct >= hotPct) badges += '<span class="tape-badge hot">HOT</span>';
+      else if (five.pct <= -hotPct) badges += '<span class="tape-badge fade">FADING</span>';
     }
 
     var html = '<div class="tape-head"><div>' +
-      '<div class="tape-strike">' + esc(strike) + '</div>' +
+      '<div class="tape-strike">' +
+      (owner ? '<span class="tape-owner">' + esc(owner) + '</span> ' : "") +
+      esc(strike) + '</div>' +
       '<div class="tape-exp">' + esc(expLabel) +
       (meta.dte === null || meta.dte === undefined ? "" : " · " + meta.dte + " DTE") +
       '</div></div><div class="tape-badges">' + badges + '</div></div>';
@@ -370,7 +378,16 @@
           return nu;
         }
         var p = hover.points[0];
-        var key = String(p.y) + "|" + String(p.x);
+        // On ORION five boards share one figure and Plotly reports only a
+        // curveNumber, so the cell key is prefixed with whichever ticker owns
+        // that curve. The single-ticker board has no prefix.
+        var prefix = "";
+        if (tape.curves) {
+          var owner = tape.curves[String(p.curveNumber)];
+          if (!owner) { hide(el); return nu; }   // hovered a non-board trace
+          prefix = owner + "|";
+        }
+        var key = prefix + String(p.y) + "|" + String(p.x);
         var html = build(tape, key);
         if (!html) { hide(el); return nu; }
         // Re-place only when the pointer lands on a different cell, so the

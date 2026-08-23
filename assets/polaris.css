@@ -403,3 +403,5 @@ body {
 
 @media (prefers-reduced-motion: reduce) { .tape { transition: none; } }
 @media (max-width: 700px) { .tape { display: none; } }
+/* ORION: the card names the instrument, since five boards share one figure. */
+.tape-owner { font-size: 12px; font-weight: 600; color: var(--polar); letter-spacing: 0.06em; }

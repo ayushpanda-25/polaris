@@ -273,11 +273,18 @@ def build_tape(
         spark_times = downsample(
             snapshot_times(conn, ticker, now - window, now), max_points
         )
-        oldest = int(now - EXTENDED_LAGS[-1][0] * LAG_MAX_FRAC)
-        ext_times = snapshot_times(conn, ticker, oldest, now)
-        anchors: list[Optional[int]] = [
-            pick_anchor(ext_times, now, lag) for lag, _label in EXTENDED_LAGS
-        ]
+        # One narrow scan per lag rather than a single sweep back through two
+        # days of timestamps. Each extended row only ever draws from its own
+        # acceptance band, so asking for the whole span meant reading a couple
+        # of thousand rows to use a handful — and on ORION that cost was paid
+        # five times over on every flush.
+        anchors: list[Optional[int]] = []
+        for lag, _label in EXTENDED_LAGS:
+            band = snapshot_times(
+                conn, ticker,
+                int(now - lag * LAG_MAX_FRAC), int(now - lag * LAG_MIN_FRAC),
+            )
+            anchors.append(pick_anchor(band, now, lag))
 
         wanted = sorted({*spark_times, *[a for a in anchors if a is not None]})
         values = load_values(conn, ticker, wanted, strikes, expiries, column)
