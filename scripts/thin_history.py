@@ -135,20 +135,54 @@ def main() -> int:
     conn.execute("PRAGMA busy_timeout=60000")
     t0 = time.time()
     deleted = 0
-    while True:
-        cur = conn.execute(
-            "DELETE FROM gex_snapshots WHERE rowid IN ("
-            "  SELECT rowid FROM gex_snapshots WHERE ts < ? AND ts NOT IN ("
-            "    SELECT MIN(ts) FROM gex_snapshots WHERE ts < ? GROUP BY ticker, ts / ?"
-            "  ) LIMIT 500000)",
-            (cutoff, cutoff, every),
-        )
-        n = cur.rowcount or 0
-        conn.commit()
-        deleted += n
-        print(f"  deleted {deleted:,} / ~{drop:,} ({time.time()-t0:.0f}s)", flush=True)
-        if n == 0:
-            break
+
+    # Walk (ticker, day) rather than batching over the whole table.
+    #
+    # The obvious form — DELETE ... WHERE ts < cutoff AND ts NOT IN (SELECT
+    # MIN(ts) ... GROUP BY ticker, ts/every) LIMIT n — recomputes that GROUP BY
+    # across every remaining row on EVERY batch, and rescans from the start each
+    # time. Measured at ~500k rows per 106s against this store, which is about
+    # five hours with the terminal down. It is quadratic and it does not need
+    # to be.
+    #
+    # The only index is (ticker, ts), so a bare ts range cannot seek and a bare
+    # ts scan reads the whole table. Constraining BOTH columns turns each step
+    # into an index range scan over one ticker-day, and the keep-set for that
+    # window is computed once over the same small range.
+    tickers = [r[0] for r in conn.execute(
+        "SELECT DISTINCT ticker FROM gex_snapshots WHERE ts < ?", (cutoff,))]
+    oldest = conn.execute(
+        "SELECT MIN(ts) FROM gex_snapshots WHERE ts < ?", (cutoff,)).fetchone()[0]
+    if oldest is None:
+        print("nothing older than the window; nothing to do.")
+        conn.close()
+        return 0
+
+    day = 86400
+    windows = list(range((oldest // day) * day, cutoff, day))
+    total_steps = len(windows) * len(tickers)
+    step = 0
+    for lo in windows:
+        hi = min(lo + day, cutoff)
+        for tkr in tickers:
+            step += 1
+            cur = conn.execute(
+                "DELETE FROM gex_snapshots WHERE ticker = ? AND ts >= ? AND ts < ? "
+                "AND ts NOT IN (SELECT MIN(ts) FROM gex_snapshots "
+                "               WHERE ticker = ? AND ts >= ? AND ts < ? "
+                "               GROUP BY ts / ?)",
+                (tkr, lo, hi, tkr, lo, hi, every),
+            )
+            deleted += cur.rowcount or 0
+            # Commit per ticker-day, not per day. This runs alongside a live
+            # writer whose busy_timeout is 10s, so the write lock has to be
+            # held in short bites — batching all eleven tickers into one
+            # transaction meant holding it through ~4M deletes.
+            conn.commit()
+        pct = step / total_steps * 100
+        print(f"  {datetime.fromtimestamp(lo):%Y-%m-%d}  "
+              f"deleted {deleted:,} / ~{drop:,}  ({pct:.0f}%, {time.time()-t0:.0f}s)",
+              flush=True)
     conn.close()
     print(f"\ndone — {deleted:,} rows in {time.time()-t0:.0f}s.")
     print("The file has NOT shrunk yet; run a VACUUM INTO to reclaim the space.")
