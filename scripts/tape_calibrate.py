@@ -72,12 +72,35 @@ def visible(board: dict, spot: float):
     return {k: v for k, v in board.items() if lo <= k[0] <= hi and k[1] in keep}
 
 
-def evaluate(boards, spots, hot_pct=HOT_PCT, hot_floor=HOT_FLOOR):
-    """Replay every board and count what the badges would have done."""
+# The session is not one regime. Measured live on 2026-08-24, the first
+# twenty minutes ran 3-4x the volatility of the daily average (|5-min move|
+# median 8.3% vs 2.8%, p90 42% vs 10%), which a flat all-day number hides
+# completely. A threshold that reads well on the average can be dead at the
+# open and chatty at noon, so report the parts separately.
+SESSIONS = (
+    ("open   08:30-09:30", dtime(8, 30), dtime(9, 30)),
+    ("midday 09:30-14:00", dtime(9, 30), dtime(14, 0)),
+    ("close  14:00-15:00", dtime(14, 0), dtime(15, 0)),
+)
+
+
+def in_session(ts: int, lo: dtime, hi: dtime) -> bool:
+    return lo <= datetime.fromtimestamp(ts).time() < hi
+
+
+def evaluate(boards, spots, hot_pct=HOT_PCT, hot_floor=HOT_FLOOR, window=None):
+    """Replay every board and count what the badges would have done.
+
+    `window` restricts the boards scored to one (lo, hi) time-of-day slice;
+    the anchor still comes from the full series, so a board just after the
+    open can still reach back across it.
+    """
     times = sorted(boards)
     stats = {"boards": 0, "cells": 0, "hot": 0, "fading": 0, "flip": 0,
              "no_anchor": 0, "pcts": [], "per_board_hot": []}
     for ts in times:
+        if window and not in_session(ts, *window):
+            continue
         board = visible(boards[ts], spots[ts])
         if not board:
             continue
@@ -162,6 +185,9 @@ def main():
     if not args.sweep:
         report(f"shipped thresholds (HOT ≥ +{HOT_PCT:.0f}%, floor {HOT_FLOOR:.0%} of board max)",
                evaluate(boards, spots))
+        print()
+        for label, lo, hi in SESSIONS:
+            report(label, evaluate(boards, spots, window=(lo, hi)))
         return 0
 
     print("  threshold sweep — HOT firings per board\n")

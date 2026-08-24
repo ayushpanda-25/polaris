@@ -1098,6 +1098,11 @@ def _reading_guide():
                                              "1h/4h/1d. HOT = built fast, "
                                              "FADING = bleeding out, SIGN FLIP = "
                                              "it crossed zero."),
+                        item("First hour", "Cells move ~4x faster at the open "
+                                           "than into the close, and FADING is "
+                                           "common before 9:30 as overnight "
+                                           "positioning unwinds. Weigh a badge "
+                                           "by when you're seeing it."),
                     ]),
                     html.Div(className="g-col", children=[
                         html.Div("THE VIEWS", className="g-head"),
