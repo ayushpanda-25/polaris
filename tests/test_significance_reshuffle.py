@@ -46,6 +46,31 @@ def test_no_clear_leader_flagged():
     assert nm.sirius.significant is False
 
 
+def test_denominator_excludes_the_leader_itself():
+    """The median is over the RUNNERS-UP, not over the top-K including the top.
+
+    Pinning this because nothing else did, and a stale comment saying "median
+    of the top-K cells" was copied onto the Academy pages as the published
+    description of the test. Values chosen so the two readings disagree:
+
+        sorted |GEX|      140, 120, 100, 80, 60
+        runners-up 2..5   median(120,100,80,60) = 90  -> 140/90 = 1.56  PASS
+        all five          median(...)           = 100 -> 140/100 = 1.40 FAIL
+
+    So dropping the [1:] in _is_sirius_significant flips this to False.
+    """
+    cells = [
+        GEXCell(500, "2026-04-08", gex_value=140, vex_value=0),
+        GEXCell(495, "2026-04-08", gex_value=120, vex_value=0),
+        GEXCell(505, "2026-04-08", gex_value=100, vex_value=0),
+        GEXCell(498, "2026-04-08", gex_value=80, vex_value=0),
+        GEXCell(502, "2026-04-08", gex_value=60, vex_value=0),
+    ]
+    nm = classify_nodes(_grid(cells))
+    assert nm.sirius is not None and nm.sirius.strike == 500
+    assert nm.sirius.significant is True
+
+
 def test_single_cell_is_trivially_significant():
     """One cell, nothing to compare → significant by default."""
     cells = [GEXCell(500, "2026-04-08", gex_value=-50, vex_value=0)]

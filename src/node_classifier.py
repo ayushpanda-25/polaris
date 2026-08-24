@@ -41,10 +41,21 @@ class NodeMap:
     midpoints: list[Node]
 
 
-# Significance threshold: Sirius |GEX| must be at least this multiple of
-# the median |GEX| of the top-K cells to be considered a "clear leader".
-# On quiet days the top cell is barely larger than its neighbors and the
-# Sirius is meaningless noise.
+# Significance threshold: Sirius |GEX| must be at least this multiple of the
+# median |GEX| of the top-K RUNNERS-UP — ranks 2..K, with the Sirius itself
+# excluded — to count as a "clear leader". On quiet days the top cell is barely
+# larger than its neighbours and the Sirius is meaningless noise.
+#
+# The exclusion is the whole point and it is easy to misread: comparing the
+# leader against a median that INCLUDES the leader would drag the bar up with
+# the very cell being tested. It also moves the number. Over five values sorted
+# descending, the median of all five is the third; the median of ranks 2..5 is
+# the mean of the third and fourth, which is never larger. So the runners-up
+# median is the lower, and therefore the more permissive, denominator.
+#
+# This comment said "top-K cells" until 2026-08-24, contradicting the docstring
+# below, and the Academy pages on the Nexus site were written from the comment
+# rather than the code. If you edit one, edit both.
 SIGNIFICANCE_RATIO = 1.5
 SIGNIFICANCE_TOP_K = 5
 
