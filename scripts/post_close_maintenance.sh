@@ -95,3 +95,10 @@ fi
 date '+%Y-%m-%d %H:%M' > "$STAMP"
 log "gex.db $(size_gb "$DB") GB, $(free_gb) GB free"
 log "=== done ==="
+
+# Verify rather than assume. A run that half-failed leaves a log that looks
+# much like a good one, so check the things that would actually be wrong --
+# store readable, no day range eaten, terminal back up, fallback still there --
+# and put it on screen if any of that is off.
+"$PY" "$ROOT/scripts/maintenance_status.py" --notify >>"$LOG" 2>&1 \
+  || log "SELF-CHECK FAILED — see the verdict above"
