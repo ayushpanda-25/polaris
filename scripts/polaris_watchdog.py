@@ -89,7 +89,33 @@ def _data_probe_url()  -> str: return _workspace_url(
 # Only used by the stateless data-layer health probe — we never create an
 # rd session from here, so we do not conflict with polaris's own session or
 # any other LSEG-MCP consumer on this machine.
-APP_KEY = "REDACTED_KEY_ROTATED_2026-08-24"
+#
+# NEVER hardcode this value. It was committed as a literal on 2026-07-13 and
+# sat in a public repo for 42 days before being caught. It now comes from the
+# environment, or from a 600-mode credential file, and is absent by default.
+# The probe below is dead code in --cboe mode, so an empty key is harmless.
+_KEY_FILE = Path.home() / ".config" / "astraios" / "polaris-capture.env"
+
+
+def _load_app_key() -> str:
+    """EIKON_APP_KEY from the environment, else the 600-mode credential file."""
+    v = os.environ.get("EIKON_APP_KEY", "").strip()
+    if v:
+        return v
+    try:
+        for line in _KEY_FILE.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("#") or "=" not in line:
+                continue
+            name, _, val = line.partition("=")
+            if name.strip() in ("EIKON_APP_KEY", "POLARIS_ACCESS_KEY"):
+                return val.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
+APP_KEY = _load_app_key()
 TOKEN_TTL_SEC = 1800         # refresh cached handshake token every 30 min
 
 # NOTE (CBOE-only, 2026-07-21): the Workspace/LSEG probe machinery below
@@ -386,6 +412,8 @@ def proxy_responsive() -> bool:
 
 def _fetch_access_token() -> str | None:
     """POST /api/handshake and return the access_token, or None on failure."""
+    if not APP_KEY:
+        return None
     body = (
         '{"AppKey":"' + APP_KEY
         + '","AppScope":"trapi","ApiVersion":"1"}'
