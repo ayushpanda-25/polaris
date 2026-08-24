@@ -94,7 +94,7 @@ def _data_probe_url()  -> str: return _workspace_url(
 # sat in a public repo for 42 days before being caught. It now comes from the
 # environment, or from a 600-mode credential file, and is absent by default.
 # The probe below is dead code in --cboe mode, so an empty key is harmless.
-_KEY_FILE = Path.home() / ".config" / "astraios" / "polaris-capture.env"
+_KEY_FILE = Path.home() / ".config" / "astraios" / "lseg.env"
 
 
 def _load_app_key() -> str:
@@ -108,7 +108,7 @@ def _load_app_key() -> str:
             if line.startswith("#") or "=" not in line:
                 continue
             name, _, val = line.partition("=")
-            if name.strip() in ("EIKON_APP_KEY", "POLARIS_ACCESS_KEY"):
+            if name.strip() == "EIKON_APP_KEY":
                 return val.strip().strip('"').strip("'")
     except OSError:
         pass
